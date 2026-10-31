@@ -1,0 +1,311 @@
+# Fork release for Gforce10-design/OpenMinis.
+#
+# Keeps fork main merged with OpenMinis/OpenMinis main, then builds one
+# arm64 release APK signed with the fixed keystore in Actions secrets and
+# publishes it on this fork. versionCode is whatever upstream shipped
+# (so it stays >= upstream). versionName gains the -gf suffix at build
+# time only — this workflow does not commit a version bump.
+#
+# Secrets (repository, not in git):
+#   FORK_KEYSTORE_B64, FORK_KEYSTORE_PASSWORD, FORK_KEY_ALIAS, FORK_KEY_PASSWORD
+#
+# A conflict never force-pushes. The job stops and opens an issue plus a PR
+# that points fork main at the upstream commits.
+
+name: Fork release
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: fork-release
+  cancel-in-progress: false
+
+jobs:
+  sync-and-release:
+    if: github.repository == 'Gforce10-design/OpenMinis'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      FORK_VERSION_SUFFIX: "-gf"
+      FORK_RELEASE_REPO: Gforce10-design/OpenMinis
+      NDK_VERSION: "28.2.13676358"
+      BUILD_TOOLS_VERSION: "35.0.1"
+    steps:
+      - name: Checkout fork main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: false
+          persist-credentials: true
+
+      - name: Merge upstream main
+        id: sync
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "Gforce10-design"
+          git config user.email "Gforce10-design@users.noreply.github.com"
+          git remote add upstream https://github.com/OpenMinis/OpenMinis.git
+          git fetch upstream main
+          UP="$(git rev-parse upstream/main)"
+          echo "upstream_sha=$UP" >> "$GITHUB_OUTPUT"
+          if git merge-base --is-ancestor "$UP" HEAD; then
+            echo "Fork already contains upstream $UP"
+            echo "merged=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Merging upstream $UP into $(git rev-parse --short HEAD)"
+          if git merge --no-ff --no-edit upstream/main; then
+            git push origin HEAD:main
+            echo "merged=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          {
+            echo "Upstream merge into \`Gforce10-design/OpenMinis\` \`main\` conflicted. Nothing was force-pushed."
+            echo
+            echo "- upstream: \`$UP\`"
+            echo "- fork HEAD before the merge: \`$(git rev-parse HEAD)\`"
+            echo
+            echo "Conflicted files:"
+            echo
+            git diff --name-only --diff-filter=U | sed 's/^/- /'
+            echo
+            echo "Resolve on the \`sync/upstream\` branch (it is upstream \`main\`, opened as a pull request against fork \`main\`) and merge that PR. The next scheduled run retries."
+          } > /tmp/fork-sync-conflict.md
+          git merge --abort
+          BRANCH="sync/upstream-${UP:0:12}"
+          git push origin "upstream/main:refs/heads/${BRANCH}"
+          if gh issue list --state open --search "Fork sync conflict in:title" --json number --jq '.[0].number' | grep -q .; then
+            NUM="$(gh issue list --state open --search "Fork sync conflict in:title" --json number --jq '.[0].number')"
+            gh issue comment "$NUM" --body-file /tmp/fork-sync-conflict.md
+          else
+            gh issue create --title "Fork sync conflict with upstream ${UP:0:12}" --body-file /tmp/fork-sync-conflict.md
+          fi
+          if gh pr view "$BRANCH" >/dev/null 2>&1; then
+            gh pr comment "$BRANCH" --body-file /tmp/fork-sync-conflict.md
+          else
+            gh pr create --base main --head "$BRANCH" --title "sync: upstream main ${UP:0:12} (conflicts)" --body-file /tmp/fork-sync-conflict.md
+          fi
+          echo "Merge conflict. Opened or updated an issue and a PR. Not force-pushing." >&2
+          exit 1
+
+      - name: Require signing secrets
+        env:
+          FORK_KEYSTORE_B64: ${{ secrets.FORK_KEYSTORE_B64 }}
+          FORK_KEYSTORE_PASSWORD: ${{ secrets.FORK_KEYSTORE_PASSWORD }}
+          FORK_KEY_ALIAS: ${{ secrets.FORK_KEY_ALIAS }}
+          FORK_KEY_PASSWORD: ${{ secrets.FORK_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in FORK_KEYSTORE_B64 FORK_KEYSTORE_PASSWORD FORK_KEY_ALIAS FORK_KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "missing repository secret: $name"
+              missing=1
+            fi
+          done
+          if [ "$missing" != 0 ]; then
+            echo "Create these Actions secrets on Gforce10-design/OpenMinis (a token with secrets:write / repo admin):"
+            echo "  gh secret set FORK_KEYSTORE_B64 --repo Gforce10-design/OpenMinis < openminis-fork-release.keystore.b64"
+            echo "  gh secret set FORK_KEYSTORE_PASSWORD --repo Gforce10-design/OpenMinis"
+            echo "  gh secret set FORK_KEY_ALIAS --repo Gforce10-design/OpenMinis"
+            echo "  gh secret set FORK_KEY_PASSWORD --repo Gforce10-design/OpenMinis"
+            echo "Alias is openminis-fork. The keystore backup is not in git."
+            exit 1
+          fi
+
+      - name: Proot submodule
+        run: git submodule update --init deps/proot
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android packages
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --install \
+            "platforms;android-36" \
+            "build-tools;${BUILD_TOOLS_VERSION}" \
+            "cmake;3.22.1" \
+            "ndk;${NDK_VERSION}" \
+            "platform-tools"
+          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "sdk.dir=${ANDROID_SDK_ROOT}" > src/android/local.properties
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.5"
+          cache: true
+
+      - name: Cache native dependencies
+        id: native-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            src/android/app/src/main/assets/proot-aarch64
+            src/android/app/src/main/assets/alpine-minirootfs.tar.gz
+            src/android/app/src/main/jniLibs/arm64-v8a/libproot.so
+            src/android/app/libs/rclone.aar
+            deps/build/proot-android
+            deps/build/rclone
+          key: fork-native-v1-${{ hashFiles('deps/build_proot.sh', 'deps/build_rclone_android.sh', 'scripts/prepare_android_sandbox.sh', 'deps/proot/**', 'deps/rclone-mobile/**', 'deps/rclone-mobile/go.sum') }}
+
+      - name: Host packages for the native build
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends make curl ca-certificates libdigest-sha-perl unzip
+
+      - name: Build native dependencies
+        run: |
+          set -euo pipefail
+          # BUILDING.md: proot, Alpine rootfs, then the rclone aar copied into app/libs.
+          # build_proot.sh verifies the vendored Termux loaders with shasum.
+          if [ ! -x src/android/app/src/main/assets/proot-aarch64 ] && [ ! -f src/android/app/src/main/assets/proot-aarch64 ]; then
+            ./deps/build_proot.sh
+          else
+            echo "proot-aarch64 present (cache or previous step)"
+            test -f src/android/app/src/main/jniLibs/arm64-v8a/libproot.so
+          fi
+          ./scripts/prepare_android_sandbox.sh
+          if [ ! -f src/android/app/libs/rclone.aar ]; then
+            go install golang.org/x/mobile/cmd/gomobile@latest
+            go install golang.org/x/mobile/cmd/gobind@latest
+            export PATH="$(go env GOPATH)/bin:${PATH}"
+            gomobile init
+            ./deps/build_rclone_android.sh
+            mkdir -p src/android/app/libs
+            cp deps/build/rclone/rclone.aar src/android/app/libs/rclone.aar
+          else
+            echo "rclone.aar present (cache)"
+          fi
+          test -s src/android/app/libs/rclone.aar
+          test -s src/android/app/src/main/assets/alpine-minirootfs.tar.gz
+          test -s src/android/app/src/main/assets/proot-aarch64
+
+      - name: Assemble signed release APK
+        env:
+          FORK_KEYSTORE_B64: ${{ secrets.FORK_KEYSTORE_B64 }}
+          FORK_KEYSTORE_PASSWORD: ${{ secrets.FORK_KEYSTORE_PASSWORD }}
+          FORK_KEY_ALIAS: ${{ secrets.FORK_KEY_ALIAS }}
+          FORK_KEY_PASSWORD: ${{ secrets.FORK_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # The committed gradle.properties heap is 2g, which OOMs this app's
+          # Kotlin compile. Raise it for this job only.
+          sed -i 's/^org.gradle.jvmargs=.*/org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8/' src/android/gradle.properties
+          grep -q '^kotlin.daemon.jvmargs=' src/android/gradle.properties || echo 'kotlin.daemon.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g' >> src/android/gradle.properties
+          cd src/android
+          chmod +x ./gradlew
+          ./gradlew :app:assembleRelease --stacktrace --no-daemon
+          test -f app/build/outputs/apk/github/release/app-github-release.apk
+
+      - name: Name the APK, check the signature, write sha256
+        id: apk
+        env:
+          FORK_KEYSTORE_PASSWORD: ${{ secrets.FORK_KEYSTORE_PASSWORD }}
+          FORK_KEY_ALIAS: ${{ secrets.FORK_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          APK="src/android/app/build/outputs/apk/github/release/app-github-release.apk"
+          AAPT="${ANDROID_SDK_ROOT}/build-tools/${BUILD_TOOLS_VERSION}/aapt"
+          APKSIGNER="${ANDROID_SDK_ROOT}/build-tools/${BUILD_TOOLS_VERSION}/apksigner"
+          BADGING="$("$AAPT" dump badging "$APK" | head -n 1)"
+          VERSION_NAME="$(printf '%s\n' "$BADGING" | sed -n "s/.*versionName='\([^']*\)'.*/\1/p")"
+          VERSION_CODE="$(printf '%s\n' "$BADGING" | sed -n "s/.*versionCode='\([^']*\)'.*/\1/p")"
+          case "$VERSION_NAME" in
+            *-gf) ;;
+            *) echo "expected a -gf versionName, got '$VERSION_NAME'" >&2; exit 1 ;;
+          esac
+          NAMED="MinisApp-${VERSION_NAME}-build${VERSION_CODE}-arm64-v8a.apk"
+          mkdir -p dist
+          cp "$APK" "dist/${NAMED}"
+          (cd dist && sha256sum "$NAMED" > SHA256SUMS)
+          "$APKSIGNER" verify --print-certs "dist/${NAMED}" > /tmp/apk-certs.txt
+          keytool -list -v \
+            -keystore src/android/build/fork-release.keystore \
+            -storepass "$FORK_KEYSTORE_PASSWORD" \
+            -alias "$FORK_KEY_ALIAS" > /tmp/keystore-certs.txt
+          python3 - << 'PY'
+          import pathlib, re, sys
+          def sha256(text):
+              m = re.search(r"SHA-?256(?: digest)?:\s*([0-9A-Fa-f:]+)", text)
+              if not m:
+                  sys.exit("no SHA-256 in:\n" + text[:500])
+              return m.group(1).replace(":", "").lower()
+          apk = sha256(pathlib.Path("/tmp/apk-certs.txt").read_text())
+          ks = sha256(pathlib.Path("/tmp/keystore-certs.txt").read_text())
+          print("apk_cert_sha256", apk)
+          print("keystore_cert_sha256", ks)
+          if apk != ks:
+              sys.exit("APK certificate does not match the fork keystore")
+          pathlib.Path("dist/cert-sha256.txt").write_text(apk + "\n")
+          PY
+          {
+            echo "version_name=$VERSION_NAME"
+            echo "version_code=$VERSION_CODE"
+            echo "apk_name=$NAMED"
+          } >> "$GITHUB_OUTPUT"
+          echo "APK dist/${NAMED}"
+          cat dist/SHA256SUMS
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION_NAME="${{ steps.apk.outputs.version_name }}"
+          VERSION_CODE="${{ steps.apk.outputs.version_code }}"
+          NAMED="${{ steps.apk.outputs.apk_name }}"
+          TAG="v${VERSION_NAME}"
+          SHA256="$(cut -d' ' -f1 dist/SHA256SUMS)"
+          CERT="$(tr -d '[:space:]' < dist/cert-sha256.txt)"
+          NOTES="$(mktemp)"
+          cat > "$NOTES" << EOF
+          Fork build of OpenMinis ${VERSION_NAME} (versionCode ${VERSION_CODE}).
+
+          - commit: ${GITHUB_SHA}
+          - upstream: ${{ steps.sync.outputs.upstream_sha }}
+          - apk: ${NAMED}
+          - apk sha256: ${SHA256}
+          - signing certificate SHA-256: ${CERT}
+
+          The version name ends in -gf. versionCode is the upstream build number, so a newer upstream release still installs over an older fork build signed with this same key. This APK is not the official OpenMinis signature; it does not replace an official install in place.
+          EOF
+          TITLE="OpenMinis ${VERSION_NAME} (build ${VERSION_CODE})"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "dist/${NAMED}" dist/SHA256SUMS --clobber
+            gh release edit "$TAG" --title "$TITLE" --notes-file "$NOTES" --latest --prerelease=false
+          else
+            gh release create "$TAG" "dist/${NAMED}" dist/SHA256SUMS \
+              --title "$TITLE" --notes-file "$NOTES" --latest
+          fi
+          gh release view "$TAG" --json url,tagName --jq '.url'
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fork-release-apk
+          path: |
+            dist/*.apk
+            dist/SHA256SUMS
+            dist/cert-sha256.txt
+          if-no-files-found: error
