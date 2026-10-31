@@ -1,3 +1,5 @@
+import java.io.File
+import java.util.Base64
 import java.util.Properties
 
 plugins {
@@ -22,6 +24,66 @@ val appCustomization = Properties().apply {
 fun customizationValue(key: String): String =
     (appCustomization.getProperty(key) ?: "").replace("\"", "\\\"")
 
+// [fork] Gforce10-design/OpenMinis only. Upstream builds leave these unset:
+// versionName stays the upstream value, RELEASE_REPO stays OpenMinis/OpenMinis,
+// and release keeps the debug signing config (BUILDING.md). The fork workflow
+// sets them so a release is signed with one long-lived key and the in-app
+// updater reads Gforce10-design/OpenMinis instead of the official APKs.
+val forkStorePassword = System.getenv("FORK_KEYSTORE_PASSWORD")?.trim().orEmpty()
+val forkKeyAlias = System.getenv("FORK_KEY_ALIAS")?.trim().orEmpty()
+val forkKeyPassword = System.getenv("FORK_KEY_PASSWORD")?.trim().orEmpty()
+val forkKeystorePath = System.getenv("FORK_KEYSTORE_FILE")?.trim().orEmpty()
+val forkKeystoreB64 = System.getenv("FORK_KEYSTORE_B64")?.trim().orEmpty()
+
+fun forkReleaseRepo(): String {
+    val raw = System.getenv("FORK_RELEASE_REPO")?.trim().orEmpty()
+    if (raw.isEmpty()) return "OpenMinis/OpenMinis"
+    require(raw.matches(Regex("[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"))) {
+        "FORK_RELEASE_REPO must look like owner/name"
+    }
+    return raw
+}
+
+fun forkVersionName(upstream: String): String {
+    val raw = System.getenv("FORK_VERSION_SUFFIX")?.trim().orEmpty()
+    if (raw.isEmpty()) return upstream
+    val suffix = if (raw.startsWith("-")) raw else "-$raw"
+    require(suffix.matches(Regex("-[-A-Za-z0-9.]+"))) {
+        "FORK_VERSION_SUFFIX must look like -gf"
+    }
+    return upstream + suffix
+}
+
+fun resolveForkKeystore(): java.io.File? {
+    val requested = forkKeystorePath.isNotEmpty() || forkKeystoreB64.isNotEmpty() ||
+        forkStorePassword.isNotEmpty() || forkKeyAlias.isNotEmpty() || forkKeyPassword.isNotEmpty()
+    if (!requested) return null
+    if (forkStorePassword.isEmpty() || forkKeyAlias.isEmpty() || forkKeyPassword.isEmpty()) {
+        throw GradleException(
+            "Fork release signing is incomplete. Set FORK_KEYSTORE_PASSWORD, FORK_KEY_ALIAS, FORK_KEY_PASSWORD, and FORK_KEYSTORE_FILE or FORK_KEYSTORE_B64.",
+        )
+    }
+    if (forkKeystorePath.isNotEmpty()) {
+        val file = File(forkKeystorePath)
+        if (!file.isFile) throw GradleException("FORK_KEYSTORE_FILE is not a file: $forkKeystorePath")
+        return file
+    }
+    if (forkKeystoreB64.isEmpty()) {
+        throw GradleException("Set FORK_KEYSTORE_FILE or FORK_KEYSTORE_B64.")
+    }
+    val bytes = try {
+        Base64.getDecoder().decode(forkKeystoreB64.replace(Regex("\\s+"), ""))
+    } catch (e: IllegalArgumentException) {
+        throw GradleException("FORK_KEYSTORE_B64 is not valid base64.")
+    }
+    val out = rootProject.layout.buildDirectory.file("fork-release.keystore").get().asFile
+    out.parentFile.mkdirs()
+    out.writeBytes(bytes)
+    return out
+}
+
+val forkKeystore = resolveForkKeystore()
+
 android {
     namespace = "com.openminis.app"
     // [T-android-dynamic-island] Bumped 35→36 so the Android 16 (Baklava)
@@ -37,7 +99,7 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = 37
-        versionName = "1.15"
+        versionName = forkVersionName("1.15")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -63,7 +125,7 @@ android {
         // prerelease flag and cut a tag at its first '-') see them as version
         // 0 and never offer them. UPDATE_CHANNEL is the channel a fresh
         // install starts on; the user can switch to beta in About.
-        buildConfigField("String", "RELEASE_REPO", "\"OpenMinis/OpenMinis\"")
+        buildConfigField("String", "RELEASE_REPO", "\"${forkReleaseRepo()}\"")
         buildConfigField("String", "UPDATE_CHANNEL", "\"stable\"")
 
         ndk {
@@ -82,6 +144,19 @@ android {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
             version = "3.22.1"
+        }
+    }
+
+    // [fork] Present only when FORK_KEYSTORE_* is set. Otherwise release
+    // below keeps signingConfigs.debug, matching an upstream build.
+    signingConfigs {
+        if (forkKeystore != null) {
+            create("forkRelease") {
+                storeFile = forkKeystore
+                storePassword = forkStorePassword
+                keyAlias = forkKeyAlias
+                keyPassword = forkKeyPassword
+            }
         }
     }
 
@@ -126,7 +201,11 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (forkKeystore != null) {
+                signingConfigs.getByName("forkRelease")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 

@@ -287,8 +287,14 @@ object UpdateChecker {
         return CheckResult.UpToDate
     }
 
-    /** Public so UI can deep-link users to manual download when GitHub is blocked. */
-    const val RELEASES_URL: String = "https://github.com/OpenMinis/OpenMinis/releases"
+    /**
+     * Public so UI can deep-link users to manual download when GitHub is blocked.
+     * [BuildConfig.RELEASE_REPO] is OpenMinis/OpenMinis unless a fork build sets
+     * FORK_RELEASE_REPO, in which case this page is that fork — never the
+     * official APKs, which are signed with a different key.
+     */
+    val RELEASES_URL: String
+        get() = "https://github.com/${BuildConfig.RELEASE_REPO}/releases"
 
     /**
      * Stream the APK from [url] into `${cacheDir}/shared/minis-update.apk`,
