@@ -609,6 +609,10 @@ class MinisApp : Application(), ImageLoaderFactory {
         // foreground, throttled (24 h stable / 6 h beta); off on store builds.
         runCatching { com.openminis.app.data.UpdateAutoChecker.install(this) }
             .onFailure { Log.w("MinisApp", "update auto-check install failed: ${it.message}") }
+        // [fork-version-update] Separate from the in-app installer and from
+        // the inbound task API: a daily WorkManager check plus one check now.
+        runCatching { com.openminis.app.release.VersionUpdateScheduler.install(this) }
+            .onFailure { Log.w("MinisApp", "version update check not started: ${it.message}") }
         } catch (t: Throwable) {
             // subsystemsInitialized stays false — MainActivity will show the
             // crash-share dialog rather than composing against unassigned
