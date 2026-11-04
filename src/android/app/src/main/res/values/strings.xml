@@ -2138,6 +2138,14 @@
     <!-- Blank ANTHROPIC_OAUTH_IDENTIFIER_PROMPT (example provider-customization.properties). -->
     <string name="claude_oauth_not_configured">Claude OAuth isn\'t configured in this build. The identifier prompt was left blank, so this install can\'t send Claude Code OAuth requests.</string>
     <string name="claude_oauth_provider_unavailable">Unavailable in this build</string>
+    <string name="chat_error_network">Couldn\'t reach the provider. Check your network and try again.</string>
+    <string name="chat_error_auth">The provider rejected the credentials (HTTP %1$d). Check the API key or sign in again.</string>
+    <string name="chat_error_rate_limited">The provider is rate-limiting requests. Wait a moment and try again.</string>
+    <string name="chat_error_server">The provider returned an error (HTTP %1$d). Try again in a moment.</string>
+    <string name="chat_error_bad_response">The provider\'s response couldn\'t be read. Try again, or switch models.</string>
+    <string name="chat_error_token_refresh">Couldn\'t refresh the sign-in token. Sign in again from Settings.</string>
+    <string name="chat_error_missing_model">This model isn\'t available on the signed-in account. Pick another model.</string>
+    <string name="chat_error_provider_unsupported">This provider can\'t send messages in this build.</string>
     <string name="chat_error_model_refused">The model declined to respond to this request. Try rephrasing, or switch to a different model.</string>
     <string name="chat_error_model_refused_category">Blocked by the model provider\'s usage policy (category: %1$s). Continuing or rephrasing in this chat will likely be blocked again — switch to a different model, or start a new chat.</string>
     <string name="chat_error_max_tokens_truncated">Response truncated (max tokens reached)</string>

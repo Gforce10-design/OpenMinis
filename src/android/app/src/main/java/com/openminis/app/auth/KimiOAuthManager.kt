@@ -56,6 +56,22 @@ class KimiOAuthManager(
             refreshMutexes.getOrPut(instanceId) { Mutex() }
 
         /**
+         * Manifest `KimiOAuthClientID` when set, otherwise the official id.
+         * An explicit empty override is returned as empty and disables login;
+         * a missing entry does not.
+         */
+        fun resolveClientId(context: Context): String {
+            val meta = try {
+                context.packageManager
+                    .getApplicationInfo(context.packageName, PackageManager.GET_META_DATA)
+                    .metaData?.getString("KimiOAuthClientID")
+            } catch (_: Exception) {
+                null
+            }
+            return meta ?: OFFICIAL_CLIENT_ID
+        }
+
+        /**
          * Full device-code login flow. Suspends until the user approves (or
          * a terminal failure). [onDeviceCode] fires as soon as the device
          * code is issued so the UI can show the user code + verification URL
@@ -83,17 +99,8 @@ class KimiOAuthManager(
     override val authURL = KimiDeviceFlow.AUTH_HOST
     override val tokenURL = KimiDeviceFlow.TOKEN_URL
     override val clientId: String
-        get() {
-            val meta = try {
-                context.packageManager
-                    .getApplicationInfo(context.packageName, PackageManager.GET_META_DATA)
-                    .metaData?.getString("KimiOAuthClientID")
-            } catch (_: Exception) {
-                null
-            }
-            // Explicit empty override disables login; absent → official value.
-            return meta ?: OFFICIAL_CLIENT_ID
-        }
+        // Explicit empty override disables login; absent → official value.
+        get() = resolveClientId(context)
     override val clientSecret: String? = null
     override val callbackPort = 0
     override val redirectPath = ""

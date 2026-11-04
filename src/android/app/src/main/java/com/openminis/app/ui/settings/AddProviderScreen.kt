@@ -950,7 +950,7 @@ private fun ColumnScope.OAuthConfigSection(
                                 errorMessage = if (e is com.openminis.app.auth.OAuthNetworkUnreachableException) {
                                     context.getString(R.string.add_provider_oauth_network_unreachable)
                                 } else {
-                                    e.message ?: "${e.javaClass.simpleName}: authentication failed"
+                                    com.openminis.app.provider.ProviderFailureText.of(context, e)
                                 }
                             } finally {
                                 isAuthenticating = false

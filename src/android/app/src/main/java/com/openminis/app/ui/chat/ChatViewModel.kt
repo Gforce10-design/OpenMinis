@@ -49,6 +49,7 @@ import com.openminis.app.provider.DsmlLeak
 import com.openminis.app.provider.ImageBudget
 import com.openminis.app.provider.LLMProvider
 import com.openminis.app.provider.ProviderFactory
+import com.openminis.app.provider.ProviderFailureText
 import com.openminis.app.provider.catalogMaxThinkingLevel
 import com.openminis.app.provider.withIdleTimeout
 import com.openminis.app.provider.effectiveMaxThinkingLevel
@@ -6487,22 +6488,26 @@ class ChatViewModel(
                         // to restore, despite being signed in.
                         val apiKey = providerRepository.usableApiKey(instance) ?: ""
                         if (providerRepository.hasAnyCredential(instance)) {
-                            currentProvider = ProviderFactory.create(instance, apiKey, entry.model, context, sessionId = activeSessionId, overrides = entry.overrides)
-                            _providerName.value = instance.label.ifEmpty { entry.model.provider }
-                            resolved = true
-                            // No binding row (e.g. a synced session that only
-                            // carried model_id). If the entry belongs to the
-                            // default group, adopt that group so group fallback
-                            // works — otherwise buildFallbackProviders returns
-                            // empty and provider errors never fall back. NOT
-                            // applied to an explicit "entry" binding (user pin),
-                            // which restoreFromBinding handles above. Mirrors
-                            // the iOS runAgentLoop group-discovery fix.
-                            val defaultGroupId = providerRepository.defaultPrimaryGroupId
-                            if (defaultGroupId != null &&
-                                providerRepository.group(defaultGroupId)?.memberEntryIds?.contains(entry.id) == true
-                            ) {
-                                _selectedGroupId.value = defaultGroupId
+                            val created = createProviderSafely(instance, apiKey, entry.model, entry.overrides)
+                            if (created != null) {
+                                currentProvider = created
+                                _error.value = null
+                                _providerName.value = instance.label.ifEmpty { entry.model.provider }
+                                resolved = true
+                                // No binding row (e.g. a synced session that only
+                                // carried model_id). If the entry belongs to the
+                                // default group, adopt that group so group fallback
+                                // works — otherwise buildFallbackProviders returns
+                                // empty and provider errors never fall back. NOT
+                                // applied to an explicit "entry" binding (user pin),
+                                // which restoreFromBinding handles above. Mirrors
+                                // the iOS runAgentLoop group-discovery fix.
+                                val defaultGroupId = providerRepository.defaultPrimaryGroupId
+                                if (defaultGroupId != null &&
+                                    providerRepository.group(defaultGroupId)?.memberEntryIds?.contains(entry.id) == true
+                                ) {
+                                    _selectedGroupId.value = defaultGroupId
+                                }
                             }
                         }
                     }
@@ -6916,6 +6921,10 @@ class ChatViewModel(
                 AppLogger.info(TAG, "[UserAsk] RECOVER resuming run after load sid=${activeSessionId.take(8)}")
                 resume()
             }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                absorbChatFailure("loadSession", e)
             } finally {
                 // T201: open the gate even on early `return@launch` (draft path,
                 // missing-session path) and on exception, so the init-time
@@ -7209,13 +7218,16 @@ class ChatViewModel(
                     // entry pin on an OAuth provider must restore too.
                     if (!providerRepository.hasAnyCredential(instance)) return false
                     val apiKey = providerRepository.usableApiKey(instance) ?: ""
+                    val created = createProviderSafely(instance, apiKey, entry.model, entry.overrides)
+                        ?: return false
                     currentModel = entry.model
                     _modelName.value = entry.model.displayName
                     _providerName.value = instance.label.ifEmpty { entry.model.provider }
                     _selectedGroupId.value = null
                     _selectedGroupName.value = ""
                     _activeEntryId.value = entry.id
-                    currentProvider = ProviderFactory.create(instance, apiKey, entry.model, context, sessionId = activeSessionId, overrides = entry.overrides)
+                    currentProvider = created
+                    _error.value = null
                     true
                 }
                 else -> false
@@ -7284,13 +7296,19 @@ class ChatViewModel(
         // credential. An OAuth instance has no API key to pass — the factory
         // reads its token from storage — so "" is the correct argument there.
         val apiKey = providerRepository.usableApiKey(instance) ?: ""
+        // Build before mutating the header. Antigravity and any other type this
+        // build cannot drive throw from the factory; that used to escape the
+        // main-thread click and kill the process.
+        val created = createProviderSafely(instance, apiKey, targetEntry.model, targetEntry.overrides)
+            ?: return false
 
         currentModel = targetEntry.model
         _modelName.value = targetEntry.model.displayName
         _providerName.value = instance.label.ifEmpty { targetEntry.model.provider }
         _selectedGroupName.value = group.name
         _activeEntryId.value = targetEntry.id
-        currentProvider = ProviderFactory.create(instance, apiKey, targetEntry.model, context, sessionId = activeSessionId, overrides = targetEntry.overrides)
+        currentProvider = created
+        _error.value = null
         return true
     }
 
@@ -7507,12 +7525,38 @@ class ChatViewModel(
         }
     }
 
-    private fun failureText(e: Exception): String =
-        if (e is com.openminis.app.auth.ClaudeOAuthNotConfiguredException) {
-            context.getString(R.string.claude_oauth_not_configured)
-        } else {
-            e.message?.takeIf { it.isNotBlank() } ?: "Unknown error"
-        }
+    private fun failureText(e: Exception): String = ProviderFailureText.of(context, e)
+
+    /**
+     * Provider construction throws for types this build cannot drive
+     * (antigravity, unsupported) and for a blank required build value. That
+     * throw used to leave the main thread. Returns null and shows the error
+     * instead.
+     */
+    private fun createProviderSafely(
+        instance: com.openminis.app.data.model.ProviderInstance,
+        apiKey: String,
+        model: com.openminis.app.data.model.LLMModel,
+        overrides: com.openminis.app.data.model.ModelOverrides?,
+    ): LLMProvider? = try {
+        ProviderFactory.create(
+            instance, apiKey, model, context,
+            sessionId = activeSessionId, overrides = overrides,
+        )
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        AppLogger.warning(TAG, "ProviderFactory.create failed type=${instance.providerType}: ${e.javaClass.simpleName}: ${e.message}")
+        _error.value = failureText(e)
+        null
+    }
+
+    /** A send/resume/retry/load coroutine must not let this escape to the process. */
+    private fun absorbChatFailure(where: String, e: Exception) {
+        AppLogger.error(TAG_STREAM, "$where EXCEPTION ${e.javaClass.simpleName}: ${e.message}")
+        Log.e(TAG, "$where failed", e)
+        setInlineError(failureText(e))
+    }
 
     private fun isBoundToAbandonedModel(): Boolean =
         _autoRetryAttempt.value > 0 || _autoRetryCountdown.value > 0
@@ -7641,17 +7685,21 @@ class ChatViewModel(
             ?: providerRepository.newestProviderNewestTextEntry()
             ?: return false
         val instance = providerRepository.instance(entry.providerInstanceId) ?: return false
+        // [T-android-group-resolve-skip-uncredentialed] Build the provider for
+        // an OAuth instance too — otherwise this tier set the model name in the
+        // UI but left currentProvider null, and the first send failed.
+        // A factory throw (unsupported type) must not leave the header pointing
+        // at a model this build cannot send with.
+        if (providerRepository.hasAnyCredential(instance)) {
+            val apiKey = providerRepository.usableApiKey(instance) ?: ""
+            val created = createProviderSafely(instance, apiKey, entry.model, entry.overrides) ?: return false
+            currentProvider = created
+            _error.value = null
+        }
         currentModel = entry.model
         _modelName.value = entry.model.displayName
         _activeEntryId.value = entry.id
         _providerName.value = instance.label.ifEmpty { entry.model.provider }
-        // [T-android-group-resolve-skip-uncredentialed] Build the provider for
-        // an OAuth instance too — otherwise this tier set the model name in the
-        // UI but left currentProvider null, and the first send failed.
-        if (providerRepository.hasAnyCredential(instance)) {
-            val apiKey = providerRepository.usableApiKey(instance) ?: ""
-            currentProvider = ProviderFactory.create(instance, apiKey, entry.model, context, sessionId = activeSessionId, overrides = entry.overrides)
-        }
         return true
     }
 
@@ -7688,6 +7736,7 @@ class ChatViewModel(
         // made OAuth models unselectable from the picker.
         if (!providerRepository.hasAnyCredential(instance)) return
         val apiKey = providerRepository.usableApiKey(instance) ?: ""
+        val created = createProviderSafely(instance, apiKey, entry.model, entry.overrides) ?: return
         cancelWorkBoundToPreviousModel("selectEntry")
 
         currentModel = entry.model
@@ -7699,7 +7748,8 @@ class ChatViewModel(
         _selectedGroupId.value = null
         _selectedGroupName.value = ""
         _activeEntryId.value = entry.id
-        currentProvider = ProviderFactory.create(instance, apiKey, entry.model, context, sessionId = activeSessionId, overrides = entry.overrides)
+        currentProvider = created
+        _error.value = null
         persistBinding("""{"type":"entry","entryId":"$entryId"}""")
         // [T-newchat-default-model-fallback-android] Remember this as the
         // global last-used model so the NEXT new chat (when no default group
@@ -8387,6 +8437,10 @@ class ChatViewModel(
                 }
 
                 streamLaunched = runRerunStreamTail(initialProvider, "rerunFromToolBlock")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                absorbChatFailure("rerunFromToolBlock", e)
             } finally {
                 if (!streamLaunched) {
                     AppLogger.info(TAG_STREAM, "rerunFromToolBlock _isStreaming=false (setup aborted)")
@@ -8495,6 +8549,10 @@ class ChatViewModel(
             }
 
             streamLaunched = runRerunStreamTail(provider, "retryFromMessage")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                absorbChatFailure("retryFromMessage", e)
             } finally {
                 if (!streamLaunched) {
                     AppLogger.info(TAG_STREAM, "retry _isStreaming=false (setup aborted)")
@@ -8566,6 +8624,7 @@ class ChatViewModel(
 
         val sid = activeSessionId ?: return
         viewModelScope.launch {
+          try {
             val target = messages[index]
             val cutoffSortOrder = resolveDeleteCutoffSortOrder(sid, messages, index, target)
             if (cutoffSortOrder >= 0) {
@@ -8593,6 +8652,11 @@ class ChatViewModel(
                 "deleteFromMessage: cut at sortOrder=$cutoffSortOrder, " +
                     "${deletedMessages.size} message(s) removed, ${remaining.size} remain",
             )
+          } catch (e: CancellationException) {
+              throw e
+          } catch (e: Exception) {
+              absorbChatFailure("deleteFromMessage", e)
+          }
         }
     }
 
@@ -8768,6 +8832,9 @@ class ChatViewModel(
             } catch (e: CancellationException) {
                 AppLogger.info(TAG_STREAM, "$label streamJob CANCELLED waiting for slot")
                 Log.d(TAG, "Cancelled while waiting for concurrency slot")
+            } catch (e: Exception) {
+                absorbChatFailure("$label streamJob", e)
+                SessionActivityTracker.markStreamError(activeSessionId)
             }
             // [T-android-stale-streamjob-clears-isstreaming] Only the current
             // streamJob is allowed to flip _isStreaming false. An orphaned
@@ -9477,10 +9544,11 @@ class ChatViewModel(
         val instance = providerRepository.instance(id) ?: return
         if (!providerRepository.hasAnyCredential(instance)) return
         val apiKey = providerRepository.usableApiKey(instance) ?: ""
-        currentProvider = ProviderFactory.create(
-            instance, apiKey, currentModel ?: entry.model, context,
-            sessionId = activeSessionId, overrides = entry.overrides,
-        )
+        val created = createProviderSafely(
+            instance, apiKey, currentModel ?: entry.model, entry.overrides,
+        ) ?: return
+        currentProvider = created
+        _error.value = null
         _providerName.value = instance.label.ifEmpty { entry.model.provider }
         AppLogger.info(TAG, "[provider-edit] rebuilt provider for edited instance ${id.take(8)} (responses=${instance.useResponsesAPI})")
     }
@@ -9962,6 +10030,9 @@ class ChatViewModel(
                 } catch (e: CancellationException) {
                     AppLogger.info(TAG_STREAM, "send streamJob CANCELLED waiting for slot")
                     Log.d(TAG, "Cancelled while waiting for concurrency slot")
+                } catch (e: Exception) {
+                    absorbChatFailure("send streamJob", e)
+                    SessionActivityTracker.markStreamError(activeSessionId)
                 }
                 // [T-android-stale-streamjob-clears-isstreaming] guard — see
                 // `var streamJob` KDoc; identical pattern as runRerunStreamTail.
@@ -9973,6 +10044,10 @@ class ChatViewModel(
                 }
                 AppLogger.info(TAG_STREAM, "send streamJob EXIT")
             }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                absorbChatFailure("send", e)
             } finally {
                 if (!streamLaunched) {
                     AppLogger.info(TAG_STREAM, "send _isStreaming=false (setup aborted)")
@@ -10328,6 +10403,9 @@ class ChatViewModel(
                 } catch (e: CancellationException) {
                     AppLogger.info(TAG_STREAM, "retryLast streamJob CANCELLED waiting for slot")
                     Log.d(TAG, "Cancelled while waiting for concurrency slot")
+                } catch (e: Exception) {
+                    absorbChatFailure("retryLast streamJob", e)
+                    SessionActivityTracker.markStreamError(activeSessionId)
                 }
                 // [T-android-stale-streamjob-clears-isstreaming] guard.
                 if (streamJob === coroutineContext[Job]) {
@@ -10338,6 +10416,10 @@ class ChatViewModel(
                 }
                 AppLogger.info(TAG_STREAM, "retryLast streamJob EXIT")
             }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                absorbChatFailure("retryLast", e)
             } finally {
                 if (!streamLaunched) {
                     AppLogger.info(TAG_STREAM, "retryLast _isStreaming=false (setup aborted)")
@@ -17712,6 +17794,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
      */
     private fun resumeQueueAfterCancel() {
         viewModelScope.launch {
+          try {
             kotlinx.coroutines.delay(200)
             if (_promptQueue.value.isEmpty()) return@launch
             if (_isStreaming.value) return@launch
@@ -17833,6 +17916,9 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                     }
                 } catch (e: CancellationException) {
                     AppLogger.info(TAG_STREAM, "resumeQueueAfterCancel streamJob CANCELLED waiting for slot")
+                } catch (e: Exception) {
+                    absorbChatFailure("resumeQueueAfterCancel streamJob", e)
+                    SessionActivityTracker.markStreamError(activeSessionId)
                 }
                 // [T-android-stale-streamjob-clears-isstreaming] guard.
                 if (streamJob === coroutineContext[Job]) {
@@ -17843,6 +17929,12 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                 }
                 AppLogger.info(TAG_STREAM, "resumeQueueAfterCancel streamJob EXIT")
             }
+          } catch (e: CancellationException) {
+              throw e
+          } catch (e: Exception) {
+              absorbChatFailure("resumeQueueAfterCancel", e)
+              if (_isStreaming.value && streamJob?.isActive != true) _isStreaming.value = false
+          }
         }
     }
 
@@ -18070,6 +18162,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         }
 
         viewModelScope.launch {
+          try {
             decideUserAskExposureForRun(interactive = true)  // [T-port-user-ask]
             val systemPrompt = when (val prepared = prepareSystemPrompt(provider, buildSystemPrompt())) {
                 PreparedPrompt.Unavailable -> return@launch
@@ -18135,6 +18228,9 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                 } catch (e: CancellationException) {
                     AppLogger.info(TAG_STREAM, "resume streamJob CANCELLED waiting for slot")
                     Log.d(TAG, "Cancelled while waiting for concurrency slot (resume)")
+                } catch (e: Exception) {
+                    absorbChatFailure("resume streamJob", e)
+                    SessionActivityTracker.markStreamError(activeSessionId)
                 }
                 // [T-android-stale-streamjob-clears-isstreaming] guard.
                 if (streamJob === coroutineContext[Job]) {
@@ -18145,6 +18241,12 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                 }
                 AppLogger.info(TAG_STREAM, "resume streamJob EXIT")
             }
+          } catch (e: CancellationException) {
+              throw e
+          } catch (e: Exception) {
+              absorbChatFailure("resume", e)
+              if (_isStreaming.value && streamJob?.isActive != true) _isStreaming.value = false
+          }
         }
     }
 

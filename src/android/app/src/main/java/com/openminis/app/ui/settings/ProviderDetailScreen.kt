@@ -636,9 +636,24 @@ fun ProviderDetailScreen(
                                 // Refresh that returns a cached list is not one.
                                 refreshOutcome = providerRepository.refreshModels(instance, forceRefresh = true)
                                 AppLogger.info(TAG, "Refreshed models for ${instance.id}")
-                            } catch (e: com.openminis.app.data.repository.CodexDiscoveryAuthException) {
-                                AppLogger.warning(TAG, "Refresh rejected credential: ${e.message}")
-                                refreshAuthError = true
+                            } catch (e: kotlinx.coroutines.CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                val reason = com.openminis.app.provider.CloudProviderGuard.classify(e)
+                                AppLogger.warning(TAG, "Refresh failed: ${e.javaClass.simpleName}: ${e.message}")
+                                if (reason == com.openminis.app.provider.CloudProviderGuard.Reason.AUTH ||
+                                    e is com.openminis.app.data.repository.CodexDiscoveryAuthException
+                                ) {
+                                    refreshAuthError = true
+                                } else {
+                                    refreshOutcome = com.openminis.app.data.repository.ProviderRepository.ModelRefreshOutcome(
+                                        source = com.openminis.app.data.repository.ProviderRepository.ModelRefreshSource.KEPT,
+                                        total = entries.size,
+                                        added = 0,
+                                        removed = 0,
+                                        vendorError = com.openminis.app.provider.ProviderFailureText.of(detailContext, e),
+                                    )
+                                }
                             } finally {
                                 isRefreshing = false
                             }
@@ -1042,7 +1057,7 @@ private fun OAuthCredentialBlock(
                 } else {
                     context.getString(
                         R.string.oauth_sign_in_failed,
-                        e.message ?: e.javaClass.simpleName,
+                        com.openminis.app.provider.ProviderFailureText.of(context, e),
                     )
                 }
             } finally {

@@ -3026,7 +3026,7 @@ class ProviderRepository(private val context: Context) {
         if (stale.isEmpty()) return
         android.util.Log.i("ProviderRepo", "[ModelList] SWR refresh — ${stale.size} stale instance(s)")
         for (instance in stale) {
-            scope.launch { autoRefreshModels(instance) }
+            launchModelRefresh(scope, instance)
         }
     }
 
@@ -3105,7 +3105,31 @@ class ProviderRepository(private val context: Context) {
             prefs.edit().putLong(key, now).apply()
 
             for (instance in enabled) {
-                scope.launch { autoRefreshModels(instance) }
+                launchModelRefresh(scope, instance)
+            }
+        }
+    }
+
+    /**
+     * Model-list refresh runs on whatever scope the caller handed us, including
+     * the main scope. A JSON parse error, a 401, or a refresh failure must be
+     * logged here — an uncaught exception on that scope kills the process.
+     * Manual Refresh in Settings reports the same failures in the row subtitle.
+     */
+    private fun launchModelRefresh(
+        scope: kotlinx.coroutines.CoroutineScope,
+        instance: ProviderInstance,
+    ) {
+        scope.launch {
+            try {
+                autoRefreshModels(instance)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                android.util.Log.w(
+                    "ProviderRepo",
+                    "model refresh failed for ${instance.id}: ${e.javaClass.simpleName}: ${e.message}",
+                )
             }
         }
     }
