@@ -133,7 +133,9 @@ class ClaudeOAuthManager(context: Context, instanceId: String) : OAuthManager(co
         // Generate PKCE and state (saved for later token exchange)
         val authUrl = buildAuthorizationUrl()
 
-        val accessToken = withContext(Dispatchers.IO) {
+        val disarmDismissal = java.util.concurrent.atomic.AtomicReference<(() -> Unit)?>(null)
+        val accessToken = try {
+            withContext(Dispatchers.IO) {
             // Step 1: Wait for callback code
             val (code, state) = suspendCancellableCoroutine<Pair<String, String?>> { cont ->
                 val server = OAuthCallbackServer(
@@ -143,6 +145,7 @@ class ClaudeOAuthManager(context: Context, instanceId: String) : OAuthManager(co
                     onError = { err -> if (cont.isActive) cont.resumeWithException(err.toException(context)) },
                 ) { receivedCode, receivedState ->
                     if (cont.isActive) {
+                        callbackServer?.onExternalCancel = null
                         cont.resume(receivedCode to receivedState)
                     }
                 }
@@ -161,6 +164,11 @@ class ClaudeOAuthManager(context: Context, instanceId: String) : OAuthManager(co
                 // page focuses an input.
                 OAuthTabLauncher.launch(context, Uri.parse(authUrl))
                 Log.i(TAG, "Opened Custom Tab for Anthropic authorization")
+                // [T-oauth-browser-dismissal] Backing out used to leave the
+                // Sign In button on "Signing in…" with nothing to end the wait.
+                disarmDismissal.set(
+                    server.armBrowserDismissal(TAG, cont) { callbackServer === server },
+                )
             }
 
             callbackServer?.stop()
@@ -180,6 +188,9 @@ class ClaudeOAuthManager(context: Context, instanceId: String) : OAuthManager(co
             // Exchange only once the user is back.
             OAuthForegroundGate.awaitForeground(TAG)
             exchangeCodeJson(code)
+            }
+        } finally {
+            disarmDismissal.getAndSet(null)?.invoke()
         }
 
         Log.i(TAG, "=== Anthropic OAuth login complete (instance: $instanceId) ===")

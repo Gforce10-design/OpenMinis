@@ -196,7 +196,7 @@ class GroupsCollection(
         ClosureField(
             path = "groups.$id.fallbackStrategy",
             displayName = "Fallback policy",
-            description = "default (only on rate limiting / 5xx) / always (also on transient errors).",
+            description = "default (429, 5xx, 400, 401/403, certificate errors, other provider errors) / always (any error).",
             valueSchema = ConfigSchema.StrEnum(listOf("default", "always")),
             risk = ConfigRisk.SENSITIVE,
             revertable = true,

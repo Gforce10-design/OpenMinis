@@ -56,7 +56,9 @@ object OpenRouterOAuthManager {
         val (verifier, challenge) = generatePKCE()
         Log.i(TAG, "PKCE generated — verifier length: ${verifier.length}")
 
-        val apiKey = withContext(Dispatchers.IO) {
+        val disarmDismissal = java.util.concurrent.atomic.AtomicReference<(() -> Unit)?>(null)
+        val apiKey = try {
+            withContext(Dispatchers.IO) {
             val code = suspendCancellableCoroutine { cont ->
                 val server = OAuthCallbackServer(
                     CALLBACK_PORT,
@@ -66,6 +68,7 @@ object OpenRouterOAuthManager {
                     onError = { err -> if (cont.isActive) cont.resumeWithException(err.toException(context)) },
                 ) { receivedCode, _ ->
                     if (cont.isActive) {
+                        callbackServer?.onExternalCancel = null
                         cont.resume(receivedCode)
                     }
                 }
@@ -92,6 +95,11 @@ object OpenRouterOAuthManager {
                 // Open in Chrome Custom Tab (in-app browser, like iOS SFSafariViewController)
                 OAuthTabLauncher.launch(context, authUrl, newTask = true)
                 Log.i(TAG, "Opened Custom Tab for OpenRouter authorization")
+                // [T-oauth-browser-dismissal] Backing out used to leave the
+                // Sign In button on "Signing in…" with nothing to end the wait.
+                disarmDismissal.set(
+                    server.armBrowserDismissal(TAG, cont) { callbackServer === server },
+                )
             }
 
             callbackServer?.stop()
@@ -105,6 +113,9 @@ object OpenRouterOAuthManager {
             // Exchange only once the user is back.
             OAuthForegroundGate.awaitForeground(TAG)
             exchangeCode(code, verifier, com.openminis.app.network.NetworkRuntime.providerTag(instanceId))
+            }
+        } finally {
+            disarmDismissal.getAndSet(null)?.invoke()
         }
 
         // Store the API key

@@ -225,8 +225,8 @@ fun ModelGroupDetailScreen(
                     SettingsSection(
                         header = stringResource(R.string.model_group_detail_fallback_trigger),
                         footer = when (fallbackStrategy) {
-                            FallbackStrategy.default -> "Fall back on rate limits (429) and server errors (5xx) only."
-                            FallbackStrategy.always -> "Fall back on any error, including network and auth failures."
+                            FallbackStrategy.default -> stringResource(R.string.model_group_detail_fallback_default_footer)
+                            FallbackStrategy.always -> stringResource(R.string.model_group_detail_fallback_always_footer)
                         },
                     ) {
                         SettingsChoiceRow(

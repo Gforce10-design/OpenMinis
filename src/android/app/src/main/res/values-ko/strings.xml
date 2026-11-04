@@ -1092,6 +1092,8 @@
     <string name="model_group_detail_fallback">대체</string>
     <string name="model_group_detail_load_balance">로드 밸런싱</string>
     <string name="model_group_detail_fallback_trigger">폴백 트리거</string>
+    <string name="model_group_detail_fallback_default_footer">속도 제한(429), 서버 오류(5xx), 거부된 요청(400), 인증 실패(401/403), 인증서 오류 및 그 밖의 제공자 오류에서 다음 모델로 전환합니다.</string>
+    <string name="model_group_detail_fallback_always_footer">네트워크 오류와 인증 실패를 포함한 모든 오류에서 다음 모델로 전환합니다.</string>
     <string name="common_default">기본값</string>
     <string name="model_group_detail_always">항상</string>
     <string name="model_group_detail_unavailable">사용할 수 없음</string>

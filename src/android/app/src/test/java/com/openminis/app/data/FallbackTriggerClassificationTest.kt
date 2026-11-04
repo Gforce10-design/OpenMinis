@@ -3,6 +3,7 @@ package com.openminis.app.data
 import com.openminis.app.data.model.FallbackStrategy
 import com.openminis.app.data.model.LLMError
 import com.openminis.app.data.model.LLMModel
+import com.openminis.app.provider.TlsFailure
 import com.openminis.app.data.model.ModelEntry
 import com.openminis.app.data.model.ModelGroup
 import com.openminis.app.data.model.ProviderConfig
@@ -129,6 +130,51 @@ class FallbackTriggerClassificationTest {
         val err = LLMError.TransientError("[400] bad request", httpStatus = 400)
         assertNull(err.httpServerErrorStatus)
         assertFalse(shouldFallback(err, FallbackStrategy.default))
+    }
+
+    /**
+     * The loop's real decision, including [LLMError.isFallbackable]. The helper
+     * above is only the 429/5xx slice; a 400, a 401, and a certificate error
+     * advance under Default because they are fallbackable, which is what the
+     * settings caption has to say.
+     */
+    private fun groupAdvances(error: LLMError, strategy: FallbackStrategy): Boolean {
+        val isRateLimit = error is LLMError.RateLimited
+        val is5xx = error.isHttpServerError
+        val isFallbackableError = error.isFallbackable
+        return isRateLimit || is5xx || isFallbackableError || strategy == FallbackStrategy.always
+    }
+
+    @Test
+    fun `default advances on a rejected request, an auth failure, and a certificate error`() {
+        val rejected = LLMError.ProviderError("[400] invalid request", httpStatus = 400)
+        val unauthorized = LLMError.InvalidApiKey("rejected")
+        val forbidden = LLMError.ProviderError("[403] no", httpStatus = 403)
+        // 401/403 from the providers are InvalidApiKey, which is fallbackable
+        // on its own. A 403 that arrived as ProviderError is too.
+        val cert = LLMError.CertificateError(
+            "api.example.com",
+            TlsFailure.Kind.UNTRUSTED,
+            java.security.cert.CertPathValidatorException("Trust anchor for certification path not found"),
+        )
+        for (err in listOf(rejected, unauthorized, forbidden, cert)) {
+            assertTrue("${err.javaClass.simpleName} is fallbackable", err.isFallbackable)
+            assertTrue(
+                "default must advance on ${err.javaClass.simpleName}",
+                groupAdvances(err, FallbackStrategy.default),
+            )
+            assertFalse("these are not same-model retries", isTransient(err))
+        }
+        // 403 mapped the way the providers map it.
+        assertTrue(groupAdvances(LLMError.InvalidApiKey(), FallbackStrategy.default))
+    }
+
+    @Test
+    fun `default still does not advance on a plain network error`() {
+        val err = LLMError.NetworkError(java.io.IOException("Unable to resolve host"))
+        assertFalse(err.isFallbackable)
+        assertFalse(groupAdvances(err, FallbackStrategy.default))
+        assertTrue(groupAdvances(err, FallbackStrategy.always))
     }
 
     // ── 4. 429 and the permanent-5xx ProviderError path stay as they were ───
@@ -325,6 +371,7 @@ class FallbackTriggerClassificationTest {
 
     @Test
     fun `production still builds the trail from the provider detail`() {
+        assertTrue(vmSrc.contains("isRateLimit || is5xx || isFallbackableError ||"))
         assertTrue(vmSrc.contains("actual is com.openminis.app.data.model.LLMError.ProviderError -> actual.detail"))
         assertTrue(vmSrc.contains("val trail = (fallbackReasons + skipped).joinToString(\"\\n\")"))
         assertTrue(vmSrc.contains("throw com.openminis.app.data.model.LLMError.ProviderError(\"\$trail\\n\$finalDesc\")"))

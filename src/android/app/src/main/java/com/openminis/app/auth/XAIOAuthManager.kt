@@ -3,13 +3,7 @@ package com.openminis.app.auth
 import android.content.Context
 import android.net.Uri
 import android.util.Log
-import androidx.lifecycle.DefaultLifecycleObserver
-import androidx.lifecycle.LifecycleOwner
-import androidx.lifecycle.ProcessLifecycleOwner
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.GlobalScope
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -418,6 +412,7 @@ class XAIOAuthManager(context: Context, instanceId: String) : OAuthManager(conte
                 ?: throw Exception("xAI login: prior re-entrant call finished without a token")
         }
         isAuthenticating = true
+        val disarmDismissal = java.util.concurrent.atomic.AtomicReference<(() -> Unit)?>(null)
         try {
             Log.i(TAG, "=== xAI OAuth login started (instance: $instanceId) ===")
 
@@ -445,17 +440,10 @@ class XAIOAuthManager(context: Context, instanceId: String) : OAuthManager(conte
                     }
                     // [T-xai-oauth-stop-resume, port iOS d1dbdd5d]
                     // If the user dismisses the Custom Tab before xAI
-                    // redirects, externalCancel() resumes us with a
-                    // CancellationException so the surrounding try /
-                    // finally resets isAuthenticating immediately —
-                    // instead of hanging until the socket accept() loop
-                    // notices stop() (which on Android only happens
-                    // when a future client connects).
-                    server.onExternalCancel = {
-                        if (cont.isActive) {
-                            cont.cancel(kotlinx.coroutines.CancellationException("xAI OAuth callback cancelled"))
-                        }
-                    }
+                    // redirects, stopping the server must cancel this
+                    // continuation (armBrowserDismissal installs that hook).
+                    // Otherwise the wait hangs until a future client connects,
+                    // and the Sign In button stays on "Signing in…".
                     loginCallbackServer = server
                     server.start()
                     Log.i(TAG, "Callback server started on port $callbackPort")
@@ -477,18 +465,15 @@ class XAIOAuthManager(context: Context, instanceId: String) : OAuthManager(conte
                     //
                     // Android Custom Tabs don't expose a reliable
                     // "user dismissed" callback like iOS's
-                    // SFSafariViewControllerDelegate.didFinish, so we
-                    // detect dismissal through ProcessLifecycleOwner:
-                    // when MainActivity is foregrounded again WITHOUT
-                    // the loopback callback having fired, the user
-                    // backed out of the auth page. A 1.5s grace period
-                    // covers the race window where the redirect arrives
-                    // a beat after the Tab dismisses; if no callback
-                    // resolves the continuation in that window we
-                    // stop() the server, which fires onExternalCancel
-                    // → cont.cancel and the surrounding try/finally
-                    // clears isAuthenticating so the next tap works.
-                    armDismissalDetector()
+                    // SFSafariViewControllerDelegate.didFinish. Coming
+                    // back to the foreground without a loopback callback,
+                    // after a short grace, stops the server. onExternalCancel
+                    // then cancels this continuation so the Sign In button
+                    // leaves "Signing in…". Shared with the other browser
+                    // providers via [OAuthBrowserDismissal].
+                    disarmDismissal.set(
+                        server.armBrowserDismissal(TAG, cont) { loginCallbackServer === server },
+                    )
                 }
 
                 loginCallbackServer?.stop()
@@ -511,72 +496,7 @@ class XAIOAuthManager(context: Context, instanceId: String) : OAuthManager(conte
             return accessToken
         } finally {
             isAuthenticating = false
-            disarmDismissalDetector()
+            disarmDismissal.getAndSet(null)?.invoke()
         }
-    }
-
-    // ── Custom Tab dismissal detector ─────────────────────────────────
-
-    /**
-     * Observer that fires when the app returns to the foreground. We
-     * install this RIGHT BEFORE opening the Custom Tab, then wait a
-     * single ON_RESUME event: that means MainActivity has come back
-     * (either because the loopback callback brought it back, OR because
-     * the user dismissed the Tab without completing auth). We can't
-     * tell those two cases apart from lifecycle alone — but if a
-     * successful callback fired, [loginCallbackServer] is already null
-     * (the server self-stops after onCode), so checking that state in
-     * a short grace window after ON_RESUME tells us whether to treat
-     * this as a dismissal.
-     */
-    private var dismissalObserver: DefaultLifecycleObserver? = null
-
-    private fun armDismissalDetector() {
-        disarmDismissalDetector()
-        val observer = object : DefaultLifecycleObserver {
-            // Track that we've already seen the Tab consume foreground
-            // (CCS launch → ON_PAUSE on MainActivity → ON_RESUME). The
-            // first ON_RESUME after install fires immediately for the
-            // currently-foregrounded activity (when the lifecycle
-            // observer is added on the main thread); we ignore that
-            // synthetic event by gating on a "have we seen a stop yet"
-            // flag set by ON_STOP / ON_PAUSE.
-            @Volatile var sawBackgrounded = false
-
-            override fun onPause(owner: LifecycleOwner) { sawBackgrounded = true }
-            override fun onStop(owner: LifecycleOwner) { sawBackgrounded = true }
-
-            override fun onResume(owner: LifecycleOwner) {
-                if (!sawBackgrounded) return
-                // Give the loopback callback up to 1.5s to land —
-                // covers the race where xAI's redirect arrives a beat
-                // after the Custom Tab dismisses.
-                GlobalScope.launch {
-                    delay(1500)
-                    val server = loginCallbackServer ?: return@launch
-                    Log.w(TAG, "App resumed without OAuth callback — treating as user dismissal, stopping server")
-                    server.stop()
-                }
-            }
-        }
-        dismissalObserver = observer
-        // ProcessLifecycleOwner observer ops are main-thread only.
-        try {
-            android.os.Handler(android.os.Looper.getMainLooper()).post {
-                ProcessLifecycleOwner.get().lifecycle.addObserver(observer)
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "armDismissalDetector failed to attach observer: ${e.message}")
-        }
-    }
-
-    private fun disarmDismissalDetector() {
-        val observer = dismissalObserver ?: return
-        dismissalObserver = null
-        try {
-            android.os.Handler(android.os.Looper.getMainLooper()).post {
-                ProcessLifecycleOwner.get().lifecycle.removeObserver(observer)
-            }
-        } catch (_: Exception) {}
     }
 }

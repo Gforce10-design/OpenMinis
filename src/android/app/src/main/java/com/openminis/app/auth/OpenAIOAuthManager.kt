@@ -106,7 +106,9 @@ class OpenAIOAuthManager(context: Context, instanceId: String) : OAuthManager(co
         AppLogger.info(TAG, "authorize URL: $redactedAuthUrl")
         AppLogger.info(TAG, "redirect_uri=$redirectUri callbackPort=$callbackPort")
 
-        val accessToken = withContext(Dispatchers.IO) {
+        val disarmDismissal = java.util.concurrent.atomic.AtomicReference<(() -> Unit)?>(null)
+        val accessToken = try {
+            withContext(Dispatchers.IO) {
             // Step 1: Wait for callback code
             val (code, state) = suspendCancellableCoroutine<Pair<String, String?>> { cont ->
                 val server = OAuthCallbackServer(
@@ -116,6 +118,9 @@ class OpenAIOAuthManager(context: Context, instanceId: String) : OAuthManager(co
                     onError = { err -> if (cont.isActive) cont.resumeWithException(err.toException(context)) },
                 ) { receivedCode, receivedState ->
                     if (cont.isActive) {
+                        // Second guard: a stop() that follows a delivered code
+                        // must not also cancel the continuation.
+                        loginCallbackServer?.onExternalCancel = null
                         cont.resume(receivedCode to receivedState)
                     }
                 }
@@ -133,6 +138,12 @@ class OpenAIOAuthManager(context: Context, instanceId: String) : OAuthManager(co
                 // the IME to be dismissed whenever the authorization page focuses an input.
                 OAuthTabLauncher.launch(context, Uri.parse(authUrl))
                 AppLogger.info(TAG, "Custom Tab launched")
+                // [T-oauth-browser-dismissal] Backing out of the tab used to
+                // leave this continuation parked on accept() and the Sign In
+                // button on "Signing in…". Same resume detector as xAI.
+                disarmDismissal.set(
+                    server.armBrowserDismissal(TAG, cont) { loginCallbackServer === server },
+                )
             }
 
             loginCallbackServer?.stop()
@@ -154,6 +165,9 @@ class OpenAIOAuthManager(context: Context, instanceId: String) : OAuthManager(co
             // Exchange only once the user is back.
             OAuthForegroundGate.awaitForeground(TAG)
             exchangeCodeJson(code)
+            }
+        } finally {
+            disarmDismissal.getAndSet(null)?.invoke()
         }
 
         AppLogger.info(TAG, "=== OAuth login complete (instance=$instanceId tokenLen=${accessToken.length}) ===")
