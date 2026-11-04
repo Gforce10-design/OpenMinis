@@ -1794,6 +1794,14 @@
     <string name="error_empty_response_generic">모델이 빈 응답을 반환했습니다. 다시 시도하거나 모델을 변경하세요.</string>
     <string name="claude_oauth_not_configured">이 빌드에는 Claude OAuth가 설정되어 있지 않습니다. 식별 프롬프트가 비어 있어 Claude Code OAuth 요청을 보낼 수 없습니다.</string>
     <string name="claude_oauth_provider_unavailable">이 빌드에서는 사용할 수 없음</string>
+    <string name="chat_error_network">프로바이더에 연결하지 못했습니다. 네트워크를 확인한 뒤 다시 시도하세요.</string>
+    <string name="chat_error_auth">프로바이더가 자격 증명을 거부했습니다 (HTTP %1$d). API 키를 확인하거나 다시 로그인하세요.</string>
+    <string name="chat_error_rate_limited">프로바이더가 요청을 제한하고 있습니다. 잠시 후 다시 시도하세요.</string>
+    <string name="chat_error_server">프로바이더가 오류를 반환했습니다 (HTTP %1$d). 잠시 후 다시 시도하세요.</string>
+    <string name="chat_error_bad_response">프로바이더 응답을 읽지 못했습니다. 다시 시도하거나 모델을 바꾸세요.</string>
+    <string name="chat_error_token_refresh">로그인 토큰을 갱신하지 못했습니다. 설정에서 다시 로그인하세요.</string>
+    <string name="chat_error_missing_model">로그인한 계정에서 이 모델을 사용할 수 없습니다. 다른 모델을 선택하세요.</string>
+    <string name="chat_error_provider_unsupported">이 빌드에서는 이 프로바이더로 메시지를 보낼 수 없습니다.</string>
     <string name="chat_error_model_refused">모델이 이 요청에 대한 응답을 거부했습니다. 표현을 바꾸거나 다른 모델로 전환하세요.</string>
     <string name="chat_error_max_tokens_truncated">응답이 잘림(최대 토큰 도달)</string>
     <string name="chat_error_dsml_tool_call_leak">모델의 도구 호출이 잘못된 형식으로 반환되었습니다(사고 내용에 기록됨). 자동으로 2번 재시도했지만 실패했습니다. 「재개」를 눌러 다시 시도하세요.</string>

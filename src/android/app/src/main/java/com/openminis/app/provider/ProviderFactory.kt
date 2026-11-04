@@ -283,7 +283,11 @@ object ProviderFactory {
             // credential error rather than constructing a provider that would
             // emit malformed requests. iOS throws FactoryError here likewise.
             ProviderType.antigravity, ProviderType.unsupported -> {
-                throw com.openminis.app.data.model.LLMError.InvalidApiKey()
+                // Not an auth failure. A main-thread caller turns this into
+                // the localized "can't send in this build" error instead of
+                // crashing. The token "provider_unsupported" is what
+                // CloudProviderGuard classifies.
+                throw com.openminis.app.data.model.LLMError.ProviderError("provider_unsupported")
             }
         }
         // [T-android-thinking-rules-phase2] Tag OpenAI-family providers with their

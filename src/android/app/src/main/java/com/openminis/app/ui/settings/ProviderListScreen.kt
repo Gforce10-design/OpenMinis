@@ -209,11 +209,27 @@ fun ProviderListScreen(
                             // Claude Code OAuth needs a build-time identifier prompt.
                             // The example properties file leaves it blank; don't
                             // show that row as ready to chat.
-                            val oauthBuildUnavailable = instance.providerType ==
-                                com.openminis.app.data.model.ProviderType.anthropic &&
-                                instance.credentialType ==
-                                com.openminis.app.data.model.ProviderCredential.oauth &&
-                                !com.openminis.app.auth.ClaudeOAuthPrompt.isConfigured()
+                            // Blank required build config (Claude Code's identifier
+                            // prompt) and providers this build cannot drive
+                            // (antigravity) stay off the "ready" dot. Kimi's
+                            // manifest client-id override, when explicitly
+                            // empty, disables that OAuth login the same way.
+                            val oauth = instance.credentialType ==
+                                com.openminis.app.data.model.ProviderCredential.oauth
+                            val kimiClientId = if (
+                                oauth && instance.providerType ==
+                                com.openminis.app.data.model.ProviderType.kimiCode
+                            ) {
+                                com.openminis.app.auth.KimiOAuthManager.resolveClientId(context)
+                            } else {
+                                null
+                            }
+                            val oauthBuildUnavailable = com.openminis.app.provider.CloudProviderGuard.listUnavailable(
+                                type = instance.providerType,
+                                oauth = oauth,
+                                anthropicPrompt = com.openminis.app.auth.ClaudeOAuthPrompt.configuredOrNull(),
+                                kimiClientId = kimiClientId,
+                            )
                             val isConfigured = if (oauthBuildUnavailable) {
                                 false
                             } else if (instance.credentialType ==
