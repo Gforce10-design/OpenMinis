@@ -2135,6 +2135,9 @@
     <string name="chat_load_older_messages">↑ Load older messages</string>
     <!-- [T-error-persist-android] Shown when the model returns an empty reply (no text, no tools). -->
     <string name="error_empty_response_generic">Model returned an empty response. Please try again or switch models.</string>
+    <!-- Blank ANTHROPIC_OAUTH_IDENTIFIER_PROMPT (example provider-customization.properties). -->
+    <string name="claude_oauth_not_configured">Claude OAuth isn\'t configured in this build. The identifier prompt was left blank, so this install can\'t send Claude Code OAuth requests.</string>
+    <string name="claude_oauth_provider_unavailable">Unavailable in this build</string>
     <string name="chat_error_model_refused">The model declined to respond to this request. Try rephrasing, or switch to a different model.</string>
     <string name="chat_error_model_refused_category">Blocked by the model provider\'s usage policy (category: %1$s). Continuing or rephrasing in this chat will likely be blocked again — switch to a different model, or start a new chat.</string>
     <string name="chat_error_max_tokens_truncated">Response truncated (max tokens reached)</string>

@@ -47,19 +47,13 @@ class ClaudeOAuthManager(context: Context, instanceId: String) : OAuthManager(co
          * `ANTHROPIC_OAUTH_IDENTIFIER_PROMPT` BuildConfig field, populated from
          * `app/provider-customization.properties`. That file is tracked in the private
          * repo (filled in) but excluded from the public mirror, which ships
-         * only `provider-customization.properties.example` with an empty value. Reading
-         * it without a configured value throws — by design — the first time an
-         * OAuth (Claude Code) request needs the prompt.
+         * only `provider-customization.properties.example` with an empty value.
+         * Chat sends must not read this from a coroutine: a blank value throws
+         * [ClaudeOAuthNotConfiguredException]. Use [ClaudeOAuthPrompt.apply],
+         * which reports [ClaudeOAuthPrompt.Apply.Missing] instead of throwing.
          */
         val ANTHROPIC_OAUTH_IDENTIFIER_PROMPT: String
-            get() = BuildConfig.ANTHROPIC_OAUTH_IDENTIFIER_PROMPT.ifEmpty {
-                throw IllegalStateException(
-                    "ANTHROPIC_OAUTH_IDENTIFIER_PROMPT is not configured. Copy "
-                        + "app/provider-customization.properties.example to "
-                        + "app/provider-customization.properties and set "
-                        + "ANTHROPIC_OAUTH_IDENTIFIER_PROMPT before using Claude Code OAuth."
-                )
-            }
+            get() = ClaudeOAuthPrompt.configuredOrNull() ?: throw ClaudeOAuthNotConfiguredException()
 
         /**
          * How long before expiry we proactively refresh. Mirrors iOS
