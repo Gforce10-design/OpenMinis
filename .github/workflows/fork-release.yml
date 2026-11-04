@@ -38,6 +38,9 @@ jobs:
     env:
       FORK_VERSION_SUFFIX: "-gf"
       FORK_RELEASE_REPO: Gforce10-design/OpenMinis
+      # After "Merge upstream main" adds the OpenMinis/OpenMinis remote, gh
+      # resolves the repo to that upstream. Pin every gh call to this fork.
+      GH_REPO: ${{ github.repository }}
       NDK_VERSION: "28.2.13676358"
       BUILD_TOOLS_VERSION: "35.0.1"
     steps:
@@ -267,6 +270,16 @@ jobs:
           echo "APK dist/${NAMED}"
           cat dist/SHA256SUMS
 
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fork-release-apk
+          path: |
+            dist/*.apk
+            dist/SHA256SUMS
+            dist/cert-sha256.txt
+          if-no-files-found: error
+
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -291,21 +304,12 @@ jobs:
           The version name ends in -gf. versionCode is the upstream build number, so a newer upstream release still installs over an older fork build signed with this same key. This APK is not the official OpenMinis signature; it does not replace an official install in place.
           EOF
           TITLE="OpenMinis ${VERSION_NAME} (build ${VERSION_CODE})"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "dist/${NAMED}" dist/SHA256SUMS --clobber
-            gh release edit "$TAG" --title "$TITLE" --notes-file "$NOTES" --latest --prerelease=false
+          if gh release view "$TAG" --repo "$FORK_RELEASE_REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" "dist/${NAMED}" dist/SHA256SUMS --clobber --repo "$FORK_RELEASE_REPO"
+            gh release edit "$TAG" --title "$TITLE" --notes-file "$NOTES" --latest --prerelease=false --repo "$FORK_RELEASE_REPO"
           else
             gh release create "$TAG" "dist/${NAMED}" dist/SHA256SUMS \
+              --repo "$FORK_RELEASE_REPO" \
               --title "$TITLE" --notes-file "$NOTES" --latest
           fi
-          gh release view "$TAG" --json url,tagName --jq '.url'
-
-      - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: fork-release-apk
-          path: |
-            dist/*.apk
-            dist/SHA256SUMS
-            dist/cert-sha256.txt
-          if-no-files-found: error
+          gh release view "$TAG" --repo "$FORK_RELEASE_REPO" --json url,tagName --jq '.url'
