@@ -206,7 +206,17 @@ fun ProviderListScreen(
                             // just the presence of an API key. Without this, OAuth
                             // instances always show the gray dot even after a
                             // successful sign-in or manual token paste.
-                            val isConfigured = if (instance.credentialType ==
+                            // Claude Code OAuth needs a build-time identifier prompt.
+                            // The example properties file leaves it blank; don't
+                            // show that row as ready to chat.
+                            val oauthBuildUnavailable = instance.providerType ==
+                                com.openminis.app.data.model.ProviderType.anthropic &&
+                                instance.credentialType ==
+                                com.openminis.app.data.model.ProviderCredential.oauth &&
+                                !com.openminis.app.auth.ClaudeOAuthPrompt.isConfigured()
+                            val isConfigured = if (oauthBuildUnavailable) {
+                                false
+                            } else if (instance.credentialType ==
                                 com.openminis.app.data.model.ProviderCredential.oauth) {
                                 val mgr = com.openminis.app.auth.OAuthManager.forInstance(context, instance)
                                 mgr?.isAuthenticated() == true
@@ -286,6 +296,7 @@ fun ProviderListScreen(
                                             apiKey = apiKey,
                                             isConfigured = isConfigured,
                                             needsReauth = needsReauth,
+                                            oauthBuildUnavailable = oauthBuildUnavailable,
                                             onClick = { onProviderClick(instance.id) },
                                         )
                                     }
@@ -411,9 +422,10 @@ private fun ProviderInstanceRow(
     apiKey: String?,
     isConfigured: Boolean,
     needsReauth: Boolean = false,
+    oauthBuildUnavailable: Boolean = false,
     onClick: () -> Unit,
 ) {
-    val isActive = isConfigured && instance.isEnabled
+    val isActive = isConfigured && instance.isEnabled && !oauthBuildUnavailable
 
     Row(
         modifier = Modifier
@@ -462,12 +474,13 @@ private fun ProviderInstanceRow(
                 Text(
                     // [T-empty-key-compat-endpoints] Keyless compatible endpoint:
                     // say so instead of the alarming "No API key".
-                    text = if (needsReauth) stringResource(R.string.provider_oauth_sign_in_expired)
+                    text = if (oauthBuildUnavailable) stringResource(R.string.claude_oauth_provider_unavailable)
+                        else if (needsReauth) stringResource(R.string.provider_oauth_sign_in_expired)
                         else if (!apiKey.isNullOrBlank()) maskKey(apiKey)
                         else if (instance.allowsEmptyAPIKey) stringResource(R.string.provider_no_key_required)
                         else stringResource(R.string.provider_no_api_key),
                     style = MaterialTheme.typography.bodySmall,
-                    color = if (needsReauth) MaterialTheme.colorScheme.error
+                    color = if (needsReauth || oauthBuildUnavailable) MaterialTheme.colorScheme.error
                         else MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                 )

@@ -314,6 +314,14 @@ class MainActivity : ComponentActivity() {
             val allGranted = results.isNotEmpty() && results.values.all { it }
             OffloadPermissionManager.respondToAndroidPermission(allGranted)
         }
+        // [fork-version-update] One request, separate from the offload
+        // permission launcher so a grant does not look like an offload result.
+        val versionUpdatePermissionLauncher = registerForActivityResult(
+            ActivityResultContracts.RequestPermission()
+        ) { granted ->
+            if (granted) com.openminis.app.release.VersionUpdateScheduler.checkSoon(this)
+        }
+        com.openminis.app.release.VersionUpdatePermission.maybeAsk(this, versionUpdatePermissionLauncher)
         settingsLauncher = registerForActivityResult(
             ActivityResultContracts.StartActivityForResult()
         ) { /* polled by OffloadPermissionManager.requestSettingsGate */ }

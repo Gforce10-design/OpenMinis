@@ -7451,12 +7451,68 @@ class ChatViewModel(
      * The rest of the prompt is not model-specific on Android.
      */
     private fun systemPromptFor(provider: LLMProvider, prompt: String?): String? {
-        val prefix = com.openminis.app.auth.ClaudeOAuthManager.ANTHROPIC_OAUTH_IDENTIFIER_PROMPT
-        if (prompt == null || prefix.isEmpty()) return prompt
-        val bare = if (prompt.startsWith(prefix)) prompt.removePrefix(prefix).trimStart('\n') else prompt
         val oauth = (provider as? com.openminis.app.provider.anthropic.AnthropicProvider)?.isOAuth == true
-        return if (oauth) "$prefix\n\n$bare" else bare
+        return when (val applied = com.openminis.app.auth.ClaudeOAuthPrompt.apply(
+            prompt, oauth, com.openminis.app.auth.ClaudeOAuthPrompt.configuredOrNull(),
+        )) {
+            is com.openminis.app.auth.ClaudeOAuthPrompt.Apply.Ready -> applied.prompt
+            com.openminis.app.auth.ClaudeOAuthPrompt.Apply.Missing ->
+                throw com.openminis.app.auth.ClaudeOAuthNotConfiguredException()
+        }
     }
+
+    /**
+     * System prompt for a send that has not started streaming yet. [PreparedPrompt.Unavailable]
+     * means Claude Code OAuth is selected and this build has no identifier
+     * prompt: the in-chat error is already shown and the caller must return
+     * without launching a stream. Does not throw.
+     */
+    private sealed class PreparedPrompt {
+        class Ok(val text: String?) : PreparedPrompt()
+        data object Unavailable : PreparedPrompt()
+    }
+
+    private fun prepareSystemPrompt(provider: LLMProvider, base: String?): PreparedPrompt {
+        val oauth = (provider as? com.openminis.app.provider.anthropic.AnthropicProvider)?.isOAuth == true
+        return when (val applied = com.openminis.app.auth.ClaudeOAuthPrompt.apply(
+            base, oauth, com.openminis.app.auth.ClaudeOAuthPrompt.configuredOrNull(),
+        )) {
+            is com.openminis.app.auth.ClaudeOAuthPrompt.Apply.Ready -> PreparedPrompt.Ok(applied.prompt)
+            com.openminis.app.auth.ClaudeOAuthPrompt.Apply.Missing -> {
+                reportClaudeOAuthNotConfigured()
+                PreparedPrompt.Unavailable
+            }
+        }
+    }
+
+    private fun reportClaudeOAuthNotConfigured() {
+        val text = context.getString(R.string.claude_oauth_not_configured)
+        android.util.Log.w(TAG, "Claude Code OAuth identifier prompt is blank")
+        if (_messages.value.lastOrNull()?.role == "assistant") {
+            setInlineError(text)
+            return
+        }
+        _messages.value = _messages.value + ChatMessage(
+            id = "oauth-cfg-${System.nanoTime()}",
+            role = "assistant",
+            content = "",
+            error = text,
+        )
+        val sid = realSessionId.ifEmpty { sessionId }
+        if (sid.isNotEmpty()) {
+            viewModelScope.launch(Dispatchers.IO) {
+                runCatching { chatRepository.persistTurnError(sid, text) }
+                    .onFailure { android.util.Log.w(TAG, "persist oauth config error failed: ${it.message}") }
+            }
+        }
+    }
+
+    private fun failureText(e: Exception): String =
+        if (e is com.openminis.app.auth.ClaudeOAuthNotConfiguredException) {
+            context.getString(R.string.claude_oauth_not_configured)
+        } else {
+            e.message?.takeIf { it.isNotBlank() } ?: "Unknown error"
+        }
 
     private fun isBoundToAbandonedModel(): Boolean =
         _autoRetryAttempt.value > 0 || _autoRetryCountdown.value > 0
@@ -8639,12 +8695,10 @@ class ChatViewModel(
         }
 
         decideUserAskExposureForRun(interactive = true)  // [T-port-user-ask]
-        val baseSystemPrompt = buildSystemPrompt()
-        val systemPrompt = if ((provider as? com.openminis.app.provider.anthropic.AnthropicProvider)?.isOAuth == true) {
-            val prefix = com.openminis.app.auth.ClaudeOAuthManager.ANTHROPIC_OAUTH_IDENTIFIER_PROMPT
-            if (baseSystemPrompt?.startsWith(prefix) == true) baseSystemPrompt
-            else "$prefix\n\n${baseSystemPrompt ?: ""}"
-        } else baseSystemPrompt
+        val systemPrompt = when (val prepared = prepareSystemPrompt(provider, buildSystemPrompt())) {
+            PreparedPrompt.Unavailable -> return false
+            is PreparedPrompt.Ok -> prepared.text
+        }
 
         // _isStreaming was already set synchronously by the caller.
         val launchedProvider = provider
@@ -8691,7 +8745,7 @@ class ChatViewModel(
                 } catch (e: Exception) {
                     AppLogger.error(TAG_STREAM, "$label runAgentLoop EXCEPTION ${e.javaClass.simpleName}: ${e.message}")
                     Log.e(TAG, "Agent loop error ($label)", e)
-                    setInlineError(e.message ?: "Unknown error")
+                    setInlineError(failureText(e))
                     // T298: flag the upcoming setInactive() so the
                     // background completion notifier renders the ❌
                     // variant instead of a clean success.
@@ -9366,7 +9420,7 @@ class ChatViewModel(
                 throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Agent loop (queued-drain) error", e)
-                setInlineError(e.message ?: "Unknown error")
+                setInlineError(failureText(e))
                 break
             }
         }
@@ -9810,12 +9864,10 @@ class ChatViewModel(
             // Build system prompt
             // Anthropic OAuth requires the Claude Code prefix in the system prompt
             decideUserAskExposureForRun(interactive = !headless, userAskAnswer = userAskAnswer)  // [T-port-user-ask]
-            val baseSystemPrompt = buildSystemPrompt()
-            val systemPrompt = if ((provider as? com.openminis.app.provider.anthropic.AnthropicProvider)?.isOAuth == true) {
-                val prefix = com.openminis.app.auth.ClaudeOAuthManager.ANTHROPIC_OAUTH_IDENTIFIER_PROMPT
-                if (baseSystemPrompt?.startsWith(prefix) == true) baseSystemPrompt
-                else "$prefix\n\n${baseSystemPrompt ?: ""}"
-            } else baseSystemPrompt
+            val systemPrompt = when (val prepared = prepareSystemPrompt(provider, buildSystemPrompt())) {
+                PreparedPrompt.Unavailable -> return@launch
+                is PreparedPrompt.Ok -> prepared.text
+            }
 
             // Start agent loop with fallback. _isStreaming was set synchronously at top.
             streamLaunched = true
@@ -9889,7 +9941,7 @@ class ChatViewModel(
                         val imageHint = if (ImageInputPreflight.isLikelyImageRejection(e, imageParts.size)) {
                             "\n" + context.getString(R.string.image_input_rejected_hint, imageParts.size)
                         } else ""
-                        setInlineError((e.message ?: "Unknown error") + imageHint)
+                        setInlineError(failureText(e) + imageHint)
                         // T298: completion notifier should show the ❌ variant.
                         SessionActivityTracker.markStreamError(activeSessionId)
                     } finally {
@@ -10211,12 +10263,10 @@ class ChatViewModel(
             }
 
             decideUserAskExposureForRun(interactive = true)  // [T-port-user-ask]
-            val baseSystemPrompt = buildSystemPrompt()
-            val systemPrompt = if ((provider as? com.openminis.app.provider.anthropic.AnthropicProvider)?.isOAuth == true) {
-                val prefix = com.openminis.app.auth.ClaudeOAuthManager.ANTHROPIC_OAUTH_IDENTIFIER_PROMPT
-                if (baseSystemPrompt?.startsWith(prefix) == true) baseSystemPrompt
-                else "$prefix\n\n${baseSystemPrompt ?: ""}"
-            } else baseSystemPrompt
+            val systemPrompt = when (val prepared = prepareSystemPrompt(provider, buildSystemPrompt())) {
+                PreparedPrompt.Unavailable -> return@launch
+                is PreparedPrompt.Ok -> prepared.text
+            }
 
             // _isStreaming was already set synchronously at the top.
             streamLaunched = true
@@ -10257,7 +10307,7 @@ class ChatViewModel(
                     } catch (e: Exception) {
                         AppLogger.error(TAG_STREAM, "retryLast runAgentLoop EXCEPTION ${e.javaClass.simpleName}: ${e.message}")
                         Log.e(TAG, "Agent loop error (retryLast)", e)
-                        setInlineError(e.message ?: "Unknown error")
+                        setInlineError(failureText(e))
                         // T298: completion notifier should show the ❌ variant.
                         SessionActivityTracker.markStreamError(activeSessionId)
                     } finally {
@@ -17716,12 +17766,10 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
             }
 
             decideUserAskExposureForRun(interactive = _promptQueue.value.any { it.origin == QueuedPromptOrigin.USER })  // [T-port-user-ask]
-            val baseSystemPrompt = buildSystemPrompt()
-            val systemPrompt = if ((provider as? com.openminis.app.provider.anthropic.AnthropicProvider)?.isOAuth == true) {
-                val prefix = com.openminis.app.auth.ClaudeOAuthManager.ANTHROPIC_OAUTH_IDENTIFIER_PROMPT
-                if (baseSystemPrompt?.startsWith(prefix) == true) baseSystemPrompt
-                else "$prefix\n\n${baseSystemPrompt ?: ""}"
-            } else baseSystemPrompt
+            val systemPrompt = when (val prepared = prepareSystemPrompt(provider, buildSystemPrompt())) {
+                PreparedPrompt.Unavailable -> return@launch
+                is PreparedPrompt.Ok -> prepared.text
+            }
 
             // T145: claim the streaming flag synchronously before launching
             // the streamJob so a concurrent send/retry tap is rejected by the
@@ -17767,7 +17815,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                     } catch (e: Exception) {
                         AppLogger.error(TAG_STREAM, "resumeQueueAfterCancel drain EXCEPTION ${e.javaClass.simpleName}: ${e.message}")
                         Log.e(TAG, "Queued drain error (resumeQueueAfterCancel)", e)
-                        setInlineError(e.message ?: "Unknown error")
+                        setInlineError(failureText(e))
                     } finally {
                         AppLogger.info(TAG_STREAM, "resumeQueueAfterCancel streamJob FINALLY enter")
                         // [T-android-overlay-reply-status-34599] Surface
@@ -18023,13 +18071,10 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
 
         viewModelScope.launch {
             decideUserAskExposureForRun(interactive = true)  // [T-port-user-ask]
-            val baseSystemPrompt = buildSystemPrompt()
-            val systemPrompt =
-                if ((provider as? com.openminis.app.provider.anthropic.AnthropicProvider)?.isOAuth == true) {
-                    val prefix = com.openminis.app.auth.ClaudeOAuthManager.ANTHROPIC_OAUTH_IDENTIFIER_PROMPT
-                    if (baseSystemPrompt?.startsWith(prefix) == true) baseSystemPrompt
-                    else "$prefix\n\n${baseSystemPrompt ?: ""}"
-                } else baseSystemPrompt
+            val systemPrompt = when (val prepared = prepareSystemPrompt(provider, buildSystemPrompt())) {
+                PreparedPrompt.Unavailable -> return@launch
+                is PreparedPrompt.Ok -> prepared.text
+            }
 
             AppLogger.info(TAG_STREAM, "resume _isStreaming=true (sid=$activeSessionId)")
             _isStreaming.value = true
@@ -18071,7 +18116,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                     } catch (e: Exception) {
                         AppLogger.error(TAG_STREAM, "resume runAgentLoop EXCEPTION ${e.javaClass.simpleName}: ${e.message}")
                         Log.e(TAG, "Agent loop error (resume)", e)
-                        setInlineError(e.message ?: "Unknown error")
+                        setInlineError(failureText(e))
                     } finally {
                         AppLogger.info(TAG_STREAM, "resume streamJob FINALLY enter")
                         // [T-android-overlay-reply-status-34599] Surface
