@@ -134,8 +134,15 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      # setup-android@v3 defaults to "tools platform-tools". Google removed the
+      # obsolete SDK "tools" package, so sdkmanager exits with
+      # "Failed to find package 'tools'" and the release never builds.
+      # platform-tools is the piece this action still needs to install;
+      # platforms, build-tools, cmake, and the NDK are installed next.
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
 
       - name: Install Android packages
         run: |
