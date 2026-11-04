@@ -231,7 +231,9 @@ enum class ImageEndpointMode {
 
 /**
  * Controls when fallback to the next model in the group is triggered.
- * - default: only on rate limiting (429) or server errors (5xx)
+ * - default: rate limits (429), server errors (5xx), provider rejections
+ *   (400 and other provider errors), auth failures (401/403), and certificate
+ *   errors. A plain network failure stays on the same model.
  * - always: on any error, including network errors, auth failures, etc.
  *
  * [B01 cross-platform read] iOS calls `default` `limited` (its

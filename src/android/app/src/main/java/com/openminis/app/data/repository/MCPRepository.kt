@@ -10,6 +10,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 
 /**
  * Manages MCP (Model Context Protocol) server configs.
@@ -77,6 +79,16 @@ class MCPRepository(private val context: Context) {
          * verbatim through servers.json.
          */
         val oauth: com.openminis.app.mcp.oauth.MCPOAuthConfig? = null,
+        /**
+         * Epoch seconds of the last semantic edit. iOS stores this in the same
+         * servers.json as the per-server last-write-wins clock
+         * ([T-mcp-per-server-sync]); the CLI preserves keys it does not know.
+         * A structured rewrite that omitted it dropped the clock, so a later
+         * iOS sync could treat the Android edit as older and overwrite it.
+         * Round-tripped as written. A local edit stamps it. Android ordering
+         * still uses [createdAt].
+         */
+        val updatedAt: Long? = null,
         /** Local-only: when this entry was first written, for recent-add ordering. */
         val createdAt: Long = System.currentTimeMillis(),
     ) {
@@ -165,7 +177,16 @@ class MCPRepository(private val context: Context) {
         return sorted
     }
 
-    /** Write [list] (defaults to current [servers]) to servers.json in mcpServers format. */
+    /**
+     * Write [list] (defaults to current [servers]) to servers.json in mcpServers format.
+     *
+     * Atomic replace, matching the CLI (`os.replace`) and iOS (`write(options: .atomic)`).
+     * A direct [File.writeText] can leave a truncated file if the process dies
+     * mid-write, and [readServersFile] treats unparseable JSON as an empty
+     * list — the next edit would then persist that empty list and drop every
+     * other server. A unique temp name keeps two overlapping saves from
+     * sharing one temp file.
+     */
     private fun save(list: List<MCPServerConfig> = _servers.value) {
         mcpDir.mkdirs()
         val mcpServers = JSONObject()
@@ -173,10 +194,18 @@ class MCPRepository(private val context: Context) {
             mcpServers.put(s.id, entryToJson(s))
         }
         val root = JSONObject().put("mcpServers", mcpServers)
+        val tmp = File(mcpDir, "servers.json.${System.nanoTime()}.tmp")
         try {
-            serversFile.writeText(root.toString(2))
+            tmp.writeText(root.toString(2))
+            Files.move(
+                tmp.toPath(),
+                serversFile.toPath(),
+                StandardCopyOption.REPLACE_EXISTING,
+                StandardCopyOption.ATOMIC_MOVE,
+            )
         } catch (e: Exception) {
             Log.e(TAG, "Failed to write servers.json: ${e.message}")
+            tmp.delete()
         }
     }
 
@@ -195,6 +224,7 @@ class MCPRepository(private val context: Context) {
         } ?: emptyList()
         val note = entry.optString("note", "").ifBlank { null }
         val createdAt = entry.optLong("createdAt", System.currentTimeMillis())
+        val updatedAt = jsonEpochSeconds(entry, "updatedAt")
         return MCPServerConfig(
             id = name,
             note = note,
@@ -206,6 +236,7 @@ class MCPRepository(private val context: Context) {
             env = env,
             startupTimeoutSeconds = parseStartupTimeout(entry),
             oauth = com.openminis.app.mcp.oauth.MCPOAuthConfig.fromJson(entry.optJSONObject("oauth")),
+            updatedAt = updatedAt,
             createdAt = createdAt,
         )
     }
@@ -253,9 +284,24 @@ class MCPRepository(private val context: Context) {
         }
         s.note?.takeIf { it.isNotBlank() }?.let { o.put("note", it) }
         o.put("enabled", s.enabled)
+        s.updatedAt?.let { o.put("updatedAt", it) }
         o.put("createdAt", s.createdAt)
         return o
     }
+
+    /** Epoch-seconds clock as iOS writes it: a number, or a numeric string. */
+    private fun jsonEpochSeconds(entry: JSONObject, key: String): Long? {
+        if (!entry.has(key) || entry.isNull(key)) return null
+        return when (val raw = entry.get(key)) {
+            is Number -> raw.toLong()
+            is String -> raw.trim().toLongOrNull()
+            else -> null
+        }
+    }
+
+    /** Move the LWW clock to now. Seconds, so an iOS peer reads the same unit. */
+    private fun stamp(server: MCPServerConfig) =
+        server.copy(updatedAt = System.currentTimeMillis() / 1000)
 
     private fun stringMap(obj: JSONObject): Map<String, String> {
         val out = LinkedHashMap<String, String>()
@@ -280,15 +326,17 @@ class MCPRepository(private val context: Context) {
     /** Add or overwrite a server (rename/overwrite is last-write-wins by id). */
     fun add(server: MCPServerConfig): Boolean {
         if (server.id.isBlank()) return false
-        _servers.value = _servers.value.filter { it.id != server.id } + server
+        val stamped = stamp(server)
+        _servers.value = _servers.value.filter { it.id != stamped.id } + stamped
         save()
-        Log.i(TAG, "Added MCP server: ${server.id}")
+        Log.i(TAG, "Added MCP server: ${stamped.id}")
         return true
     }
 
     fun update(server: MCPServerConfig): Boolean {
         if (_servers.value.none { it.id == server.id }) return false
-        _servers.value = _servers.value.map { if (it.id == server.id) server else it }
+        val stamped = stamp(server)
+        _servers.value = _servers.value.map { if (it.id == stamped.id) stamped else it }
         save()
         return true
     }
@@ -302,7 +350,7 @@ class MCPRepository(private val context: Context) {
 
     fun setEnabled(id: String, enabled: Boolean) {
         _servers.value = _servers.value.map {
-            if (it.id == id) it.copy(enabled = enabled) else it
+            if (it.id == id) stamp(it.copy(enabled = enabled)) else it
         }
         save()
     }
@@ -389,7 +437,7 @@ class MCPRepository(private val context: Context) {
             Log.w(TAG, "importJSON: not valid JSON: ${e.message}")
             return emptyList()
         }
-        val parsed = parseImportRoot(root)
+        val parsed = parseImportRoot(root).map { stamp(it) }
         if (parsed.isEmpty()) return emptyList()
         // Merge: overwrite same-name entries, keep the rest.
         val incomingIds = parsed.mapTo(HashSet()) { it.id }
