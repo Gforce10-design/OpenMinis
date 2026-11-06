@@ -26,6 +26,7 @@ jobs:
       NDK_VERSION: "28.2.13676358"
       BUILD_TOOLS_VERSION: "35.0.1"
       EXPECTED_BASE: "9961916f9e904757d19df55e24635b475317d314"
+      APPROVED_COMMIT: "77aef433a94c0929f4156a9e19e6f9a4aef8d0bf"
       EXPECTED_REF: "refs/heads/qa/om09-om13-s10-20261106"
       EXPECTED_PACKAGE: "com.openminis.app"
       EXPECTED_VERSION_NAME: "1.15-gf"
@@ -73,12 +74,25 @@ jobs:
             echo "checkout does not match the dispatched commit" >&2
             exit 1
           fi
-          parent="$(git rev-parse HEAD^)"
-          if [ "${parent}" != "${EXPECTED_BASE}" ]; then
-            echo "refusing parent ${parent}" >&2
+          git cat-file -e "${EXPECTED_BASE}^{commit}"
+          git cat-file -e "${APPROVED_COMMIT}^{commit}"
+          if ! git merge-base --is-ancestor "${EXPECTED_BASE}" HEAD; then
+            echo "refusing history that does not contain the approved base" >&2
             exit 1
           fi
-          git cat-file -e "${EXPECTED_BASE}^{commit}"
+          if ! git merge-base --is-ancestor "${APPROVED_COMMIT}" HEAD; then
+            echo "refusing history that does not contain the approved patch commit" >&2
+            exit 1
+          fi
+          mapfile -t since_approved < <(git log --name-only --pretty=format: "${APPROVED_COMMIT}..HEAD" | sed '/^$/d' | sort -u)
+          if [ "${#since_approved[@]}" -gt 0 ]; then
+            for path in "${since_approved[@]}"; do
+              if [ "${path}" != ".github/workflows/qa-om09-om13-artifact.yml" ]; then
+                echo "refusing non-workflow change since the approved patch commit: ${path}" >&2
+                exit 1
+              fi
+            done
+          fi
           expected_paths="$(mktemp)"
           actual_paths="$(mktemp)"
           printf '%s\n' \
@@ -172,97 +186,6 @@ jobs:
             exit 1
           fi
 
-      - name: Full unit tests on the clean base
-        id: test_base
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-          git worktree add --detach "${RUNNER_TEMP}/qa-base" "${EXPECTED_BASE}"
-          props="${RUNNER_TEMP}/qa-base/src/android/gradle.properties"
-          sed -i 's/^org.gradle.jvmargs=.*/org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8/' "${props}"
-          grep -q '^kotlin.daemon.jvmargs=' "${props}" || echo 'kotlin.daemon.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g' >> "${props}"
-          cd "${RUNNER_TEMP}/qa-base/src/android"
-          chmod +x ./gradlew
-          ./gradlew :app:testGithubDebugUnitTest --stacktrace --no-daemon
-
-      - name: Retain base JUnit XML
-        if: always() && steps.test_base.outcome != 'skipped'
-        run: |
-          set -euo pipefail
-          mkdir -p qa-out/junit-base
-          src="${RUNNER_TEMP}/qa-base/src/android/app/build/test-results/testGithubDebugUnitTest"
-          found=0
-          if [ -d "${src}" ]; then
-            while IFS= read -r -d '' file; do
-              found=1
-              rel="${file#"${src}/"}"
-              mkdir -p "qa-out/junit-base/$(dirname "${rel}")"
-              cp -- "${file}" "qa-out/junit-base/${rel}"
-            done < <(find "${src}" -type f -name 'TEST-*.xml' -print0)
-          fi
-          if [ "${found}" -eq 0 ]; then
-            echo "no JUnit XML was produced" > qa-out/junit-base/MISSING.txt
-          fi
-
-      - name: Full unit tests on the patched commit
-        id: test_head
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-          props="src/android/gradle.properties"
-          sed -i 's/^org.gradle.jvmargs=.*/org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8/' "${props}"
-          grep -q '^kotlin.daemon.jvmargs=' "${props}" || echo 'kotlin.daemon.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g' >> "${props}"
-          cd src/android
-          chmod +x ./gradlew
-          ./gradlew :app:testGithubDebugUnitTest --stacktrace --no-daemon
-
-      - name: Retain patched full-suite JUnit XML
-        if: always() && steps.test_head.outcome != 'skipped'
-        run: |
-          set -euo pipefail
-          mkdir -p qa-out/junit-head-full
-          src="src/android/app/build/test-results/testGithubDebugUnitTest"
-          found=0
-          if [ -d "${src}" ]; then
-            while IFS= read -r -d '' file; do
-              found=1
-              rel="${file#"${src}/"}"
-              mkdir -p "qa-out/junit-head-full/$(dirname "${rel}")"
-              cp -- "${file}" "qa-out/junit-head-full/${rel}"
-            done < <(find "${src}" -type f -name 'TEST-*.xml' -print0)
-          fi
-          if [ "${found}" -eq 0 ]; then
-            echo "no JUnit XML was produced" > qa-out/junit-head-full/MISSING.txt
-          fi
-
-      - name: Targeted OM09/OM13 tests
-        id: test_targeted
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-          cd src/android
-          chmod +x ./gradlew
-          ./gradlew :app:testGithubDebugUnitTest --tests com.openminis.app.ui.chat.QaFixesOm09Om13Test --stacktrace --no-daemon
-
-      - name: Retain targeted JUnit XML
-        if: always() && steps.test_targeted.outcome != 'skipped'
-        run: |
-          set -euo pipefail
-          mkdir -p qa-out/junit-head-targeted
-          src="src/android/app/build/test-results/testGithubDebugUnitTest"
-          found=0
-          if [ -d "${src}" ]; then
-            while IFS= read -r -d '' file; do
-              found=1
-              rel="${file#"${src}/"}"
-              mkdir -p "qa-out/junit-head-targeted/$(dirname "${rel}")"
-              cp -- "${file}" "qa-out/junit-head-targeted/${rel}"
-            done < <(find "${src}" -type f -name 'TEST-*.xml' -print0)
-          fi
-          if [ "${found}" -eq 0 ]; then
-            echo "no JUnit XML was produced" > qa-out/junit-head-targeted/MISSING.txt
-          fi
-
       - name: Host packages for the native build
         run: |
           set -euo pipefail
@@ -292,9 +215,143 @@ jobs:
           test -s src/android/app/libs/rclone.aar
           test -s src/android/app/src/main/assets/alpine-minirootfs.tar.gz
           test -s src/android/app/src/main/assets/proot-aarch64
+          test -s src/android/app/src/main/jniLibs/arm64-v8a/libproot.so
+
+      - name: Full unit tests on the clean base
+        id: test_base
+        run: |
+          set -euo pipefail
+          git worktree add --detach "${RUNNER_TEMP}/qa-base" "${EXPECTED_BASE}"
+          for rel in \
+            src/android/app/libs/rclone.aar \
+            src/android/app/src/main/assets/proot-aarch64 \
+            src/android/app/src/main/assets/alpine-minirootfs.tar.gz \
+            src/android/app/src/main/jniLibs/arm64-v8a/libproot.so
+          do
+            test -s "${rel}"
+            mkdir -p "${RUNNER_TEMP}/qa-base/$(dirname "${rel}")"
+            cp -a -- "${rel}" "${RUNNER_TEMP}/qa-base/${rel}"
+            test -s "${RUNNER_TEMP}/qa-base/${rel}"
+          done
+          echo "head_rclone_sha256=$(sha256sum src/android/app/libs/rclone.aar | awk '{print $1}')"
+          echo "base_rclone_sha256=$(sha256sum "${RUNNER_TEMP}/qa-base/src/android/app/libs/rclone.aar" | awk '{print $1}')"
+          props="${RUNNER_TEMP}/qa-base/src/android/gradle.properties"
+          sed -i 's/^org.gradle.jvmargs=.*/org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8/' "${props}"
+          grep -q '^kotlin.daemon.jvmargs=' "${props}" || echo 'kotlin.daemon.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g' >> "${props}"
+          cd "${RUNNER_TEMP}/qa-base/src/android"
+          chmod +x ./gradlew
+          set +e
+          ./gradlew :app:testGithubDebugUnitTest --stacktrace --no-daemon
+          rc=$?
+          set -e
+          mkdir -p "${GITHUB_WORKSPACE}/qa-out"
+          printf 'gradle_exit=%s\n' "${rc}" > "${GITHUB_WORKSPACE}/qa-out/test-base.status"
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::clean-base unit tests failed (gradle exit ${rc})"
+          fi
+          exit "${rc}"
+
+      - name: Retain base JUnit XML
+        if: always() && steps.test_base.outcome != 'skipped'
+        run: |
+          set -euo pipefail
+          mkdir -p qa-out/junit-base
+          src="${RUNNER_TEMP}/qa-base/src/android/app/build/test-results/testGithubDebugUnitTest"
+          found=0
+          if [ -d "${src}" ]; then
+            while IFS= read -r -d '' file; do
+              found=1
+              rel="${file#"${src}/"}"
+              mkdir -p "qa-out/junit-base/$(dirname "${rel}")"
+              cp -- "${file}" "qa-out/junit-base/${rel}"
+            done < <(find "${src}" -type f -name 'TEST-*.xml' -print0)
+          fi
+          if [ "${found}" -eq 0 ]; then
+            echo "no JUnit XML was produced" > qa-out/junit-base/MISSING.txt
+          fi
+
+      - name: Full unit tests on the patched commit
+        id: test_head
+        if: always() && steps.native.outcome == 'success' && steps.verify_tree.outcome == 'success' && steps.require_secrets.outcome == 'success'
+        run: |
+          set -euo pipefail
+          test -s src/android/app/libs/rclone.aar
+          props="src/android/gradle.properties"
+          sed -i 's/^org.gradle.jvmargs=.*/org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8/' "${props}"
+          grep -q '^kotlin.daemon.jvmargs=' "${props}" || echo 'kotlin.daemon.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g' >> "${props}"
+          cd src/android
+          chmod +x ./gradlew
+          set +e
+          ./gradlew :app:testGithubDebugUnitTest --stacktrace --no-daemon
+          rc=$?
+          set -e
+          mkdir -p "${GITHUB_WORKSPACE}/qa-out"
+          printf 'gradle_exit=%s\n' "${rc}" > "${GITHUB_WORKSPACE}/qa-out/test-head.status"
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::patched unit tests failed (gradle exit ${rc})"
+          fi
+          exit "${rc}"
+
+      - name: Retain patched full-suite JUnit XML
+        if: always() && steps.test_head.outcome != 'skipped'
+        run: |
+          set -euo pipefail
+          mkdir -p qa-out/junit-head-full
+          src="src/android/app/build/test-results/testGithubDebugUnitTest"
+          found=0
+          if [ -d "${src}" ]; then
+            while IFS= read -r -d '' file; do
+              found=1
+              rel="${file#"${src}/"}"
+              mkdir -p "qa-out/junit-head-full/$(dirname "${rel}")"
+              cp -- "${file}" "qa-out/junit-head-full/${rel}"
+            done < <(find "${src}" -type f -name 'TEST-*.xml' -print0)
+          fi
+          if [ "${found}" -eq 0 ]; then
+            echo "no JUnit XML was produced" > qa-out/junit-head-full/MISSING.txt
+          fi
+
+      - name: Targeted OM09/OM13 tests
+        id: test_targeted
+        if: always() && steps.native.outcome == 'success' && steps.verify_tree.outcome == 'success' && steps.require_secrets.outcome == 'success'
+        run: |
+          set -euo pipefail
+          test -s src/android/app/libs/rclone.aar
+          cd src/android
+          chmod +x ./gradlew
+          set +e
+          ./gradlew :app:testGithubDebugUnitTest --tests com.openminis.app.ui.chat.QaFixesOm09Om13Test --stacktrace --no-daemon
+          rc=$?
+          set -e
+          mkdir -p "${GITHUB_WORKSPACE}/qa-out"
+          printf 'gradle_exit=%s\n' "${rc}" > "${GITHUB_WORKSPACE}/qa-out/test-targeted.status"
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::targeted OM09/OM13 tests failed (gradle exit ${rc})"
+          fi
+          exit "${rc}"
+
+      - name: Retain targeted JUnit XML
+        if: always() && steps.test_targeted.outcome != 'skipped'
+        run: |
+          set -euo pipefail
+          mkdir -p qa-out/junit-head-targeted
+          src="src/android/app/build/test-results/testGithubDebugUnitTest"
+          found=0
+          if [ -d "${src}" ]; then
+            while IFS= read -r -d '' file; do
+              found=1
+              rel="${file#"${src}/"}"
+              mkdir -p "qa-out/junit-head-targeted/$(dirname "${rel}")"
+              cp -- "${file}" "qa-out/junit-head-targeted/${rel}"
+            done < <(find "${src}" -type f -name 'TEST-*.xml' -print0)
+          fi
+          if [ "${found}" -eq 0 ]; then
+            echo "no JUnit XML was produced" > qa-out/junit-head-targeted/MISSING.txt
+          fi
 
       - name: Assemble signed release APK
         id: assemble
+        if: always() && steps.verify_tree.outcome == 'success' && steps.require_secrets.outcome == 'success' && steps.native.outcome == 'success'
         env:
           FORK_VERSION_SUFFIX: "-gf"
           FORK_RELEASE_REPO: Gforce10-design/OpenMinis
@@ -312,28 +369,29 @@ jobs:
 
       - name: Verify package, version, and Fork signer
         id: verify_apk
+        if: always() && steps.verify_tree.outcome == 'success' && steps.native.outcome == 'success'
         run: |
           set -euo pipefail
+          mkdir -p dist qa-out
           APK="src/android/app/build/outputs/apk/github/release/app-github-release.apk"
-          test -f "${APK}"
           AAPT="${ANDROID_SDK_ROOT}/build-tools/${BUILD_TOOLS_VERSION}/aapt"
           APKSIGNER="${ANDROID_SDK_ROOT}/build-tools/${BUILD_TOOLS_VERSION}/apksigner"
-          BADGING="$("${AAPT}" dump badging "${APK}" | head -n 1)"
-          PACKAGE="$(printf '%s\n' "${BADGING}" | sed -n "s/.*name='\([^']*\)'.*/\1/p")"
-          VERSION_NAME="$(printf '%s\n' "${BADGING}" | sed -n "s/.*versionName='\([^']*\)'.*/\1/p")"
-          VERSION_CODE="$(printf '%s\n' "${BADGING}" | sed -n "s/.*versionCode='\([^']*\)'.*/\1/p")"
-          test "${PACKAGE}" = "${EXPECTED_PACKAGE}"
-          test "${VERSION_NAME}" = "${EXPECTED_VERSION_NAME}"
-          test "${VERSION_CODE}" = "${EXPECTED_VERSION_CODE}"
-          case "${VERSION_NAME}" in
-            *-gf) ;;
-            *) echo "expected a -gf versionName" >&2; exit 1 ;;
-          esac
-          mkdir -p dist qa-out
-          NAMED="MinisApp-${VERSION_NAME}-build${VERSION_CODE}-arm64-v8a-qa.apk"
-          cp -- "${APK}" "dist/${NAMED}"
-          (cd dist && sha256sum "${NAMED}" > SHA256SUMS)
-          "${APKSIGNER}" verify --print-certs "dist/${NAMED}" > qa-out/apk-certs.txt
+          if [ ! -f "${APK}" ]; then
+            printf 'apk_present=no\n' > qa-out/verify-status.txt
+            echo "apk file is absent" >&2
+            exit 1
+          fi
+          cp -- "${APK}" dist/app-github-release.apk
+          sha256sum dist/app-github-release.apk > dist/SHA256SUMS
+          "${AAPT}" dump badging "${APK}" > qa-out/badging.txt
+          PACKAGE="$(sed -n "1s/.*name='\([^']*\)'.*/\1/p" qa-out/badging.txt)"
+          VERSION_NAME="$(sed -n "1s/.*versionName='\([^']*\)'.*/\1/p" qa-out/badging.txt)"
+          VERSION_CODE="$(sed -n "1s/.*versionCode='\([^']*\)'.*/\1/p" qa-out/badging.txt)"
+          set +e
+          "${APKSIGNER}" verify --print-certs dist/app-github-release.apk > qa-out/apk-certs.txt
+          signer_rc=$?
+          set -e
+          set +e
           python3 - << 'PY'
           import os
           import pathlib
@@ -341,15 +399,18 @@ jobs:
           import sys
           text = pathlib.Path("qa-out/apk-certs.txt").read_text()
           match = re.search(r"SHA-?256(?: digest)?:\s*([0-9A-Fa-f:]+)", text)
-          if not match:
-              sys.exit("no certificate SHA-256 in apksigner output")
-          actual = match.group(1).replace(":", "").lower()
+          actual = match.group(1).replace(":", "").lower() if match else ""
           expected = os.environ["EXPECTED_CERT"]
-          print("apk_cert_sha256", actual)
-          if actual != expected:
-              sys.exit("APK certificate does not match the Fork signer")
           pathlib.Path("qa-out/cert-sha256.txt").write_text(actual + "\n")
+          print("apk_cert_sha256", actual or "absent")
+          if not actual or actual != expected:
+              sys.exit(1)
           PY
+          cert_rc=$?
+          set -e
+          if [ ! -f qa-out/cert-sha256.txt ]; then
+            printf '\n' > qa-out/cert-sha256.txt
+          fi
           APK_SHA256="$(cut -d' ' -f1 dist/SHA256SUMS)"
           cat > qa-out/build-meta.txt << EOF
           repository=${GITHUB_REPOSITORY}
@@ -359,13 +420,35 @@ jobs:
           package=${PACKAGE}
           version_name=${VERSION_NAME}
           version_code=${VERSION_CODE}
-          apk_name=${NAMED}
           apk_sha256=${APK_SHA256}
-          cert_sha256=${EXPECTED_CERT}
+          cert_sha256=$(tr -d '[:space:]' < qa-out/cert-sha256.txt)
+          signer_exit=${signer_rc}
+          cert_check_exit=${cert_rc}
           release_created=no
           EOF
-          echo "verified ${NAMED}"
-          cat dist/SHA256SUMS
+          cat > qa-out/verify-status.txt << EOF
+          apk_present=yes
+          package=${PACKAGE}
+          version_name=${VERSION_NAME}
+          version_code=${VERSION_CODE}
+          apk_sha256=${APK_SHA256}
+          cert_sha256=$(tr -d '[:space:]' < qa-out/cert-sha256.txt)
+          signer_exit=${signer_rc}
+          cert_check_exit=${cert_rc}
+          EOF
+          echo "recorded apk verification evidence"
+          cat qa-out/verify-status.txt
+          test "${PACKAGE}" = "${EXPECTED_PACKAGE}"
+          test "${VERSION_NAME}" = "${EXPECTED_VERSION_NAME}"
+          test "${VERSION_CODE}" = "${EXPECTED_VERSION_CODE}"
+          case "${VERSION_NAME}" in
+            *-gf) ;;
+            *) echo "expected a -gf versionName" >&2; exit 1 ;;
+          esac
+          test "${signer_rc}" -eq 0
+          test "${cert_rc}" -eq 0
+          cp -- dist/app-github-release.apk "dist/MinisApp-${VERSION_NAME}-build${VERSION_CODE}-arm64-v8a-qa.apk"
+          sha256sum "dist/MinisApp-${VERSION_NAME}-build${VERSION_CODE}-arm64-v8a-qa.apk" >> dist/SHA256SUMS
 
       - name: Delete signing material before upload
         id: purge_secrets
@@ -500,10 +583,23 @@ jobs:
                   lines.extend([f"### {key}", "", "```", source[key], "```", ""])
               return lines
 
+          status_lines = []
+          for label, name in (
+              ("base", "qa-out/test-base.status"),
+              ("head", "qa-out/test-head.status"),
+              ("targeted", "qa-out/test-targeted.status"),
+          ):
+              path = Path(name)
+              status_lines.append(
+                  f"{label} gradle status: {path.read_text().strip() if path.is_file() else 'not recorded'}"
+              )
           lines = [
               "# OM09/OM13 full unit-test differential",
               "",
               "New failures are listed only on the patched head. Unchanged failures were already failing on the clean base.",
+              "A non-zero gradle status with no XML means the test task failed before JUnit results were written.",
+              "",
+              *status_lines,
               "",
               f"base xml files: {report['base']['xml_files']}",
               f"base tests/failures/errors/skipped: {report['base']['tests']}/{report['base']['failures']}/{report['base']['errors']}/{report['base']['skipped']}",
@@ -555,20 +651,21 @@ jobs:
           copy_tree qa-out/junit-base qa-publish/junit/base
           copy_tree qa-out/junit-head-full qa-publish/junit/head-full
           copy_tree qa-out/junit-head-targeted qa-publish/junit/head-targeted
-          for name in differential.md differential.json secret-cleanup.txt; do
+          for name in differential.md differential.json secret-cleanup.txt test-base.status test-head.status test-targeted.status; do
             if [ -f "qa-out/${name}" ]; then
               cp -- "qa-out/${name}" "qa-publish/junit/${name}"
             fi
           done
-          for name in SHA256SUMS; do
-            if [ -f "dist/${name}" ]; then
-              cp -- "dist/${name}" "qa-publish/apk/${name}"
-            fi
-          done
+          if [ -f dist/SHA256SUMS ]; then
+            cp -- dist/SHA256SUMS qa-publish/apk/SHA256SUMS
+          fi
+          if [ -f dist/app-github-release.apk ]; then
+            cp -- dist/app-github-release.apk qa-publish/apk/app-github-release.apk
+          fi
           if [ -f dist/MinisApp-1.15-gf-build37-arm64-v8a-qa.apk ]; then
             cp -- dist/MinisApp-1.15-gf-build37-arm64-v8a-qa.apk qa-publish/apk/MinisApp-1.15-gf-build37-arm64-v8a-qa.apk
           fi
-          for name in cert-sha256.txt build-meta.txt apk-certs.txt; do
+          for name in cert-sha256.txt build-meta.txt apk-certs.txt verify-status.txt badging.txt; do
             if [ -f "qa-out/${name}" ]; then
               cp -- "qa-out/${name}" "qa-publish/apk/${name}"
             fi
