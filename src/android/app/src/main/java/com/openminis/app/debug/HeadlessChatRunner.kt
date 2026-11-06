@@ -328,6 +328,9 @@ internal object HeadlessChatRunner {
                 status = if (finished) "Completed" else "Timeout",
                 responseText = responseText,
                 timedOut = !finished,
+                // [OM-09] A finished loop whose turn ended in a provider error
+                // (e.g. HTTP 401) is not a success.
+                turnError = if (finished) turnErrorOf(vm.messages.value) else null,
             )
         }
     }
@@ -395,6 +398,7 @@ internal object HeadlessChatRunner {
                 timedOut = !finished,
                 deletedMessageCount = deletedCount,
                 retriedMessageId = targetMsgId,
+                turnError = if (finished) turnErrorOf(vm.messages.value) else null,
             )
         }
     }
@@ -679,7 +683,25 @@ internal object HeadlessChatRunner {
         val timedOut: Boolean,
         val deletedMessageCount: Int = 0,
         val retriedMessageId: String? = null,
-    )
+        /** [OM-09] Terminal error the turn ended with (provider 401, retries exhausted...), else null. */
+        val turnError: String? = null,
+    ) {
+        /** The run did not succeed: a hard failure status, a timeout, or a turn that ended in an error. */
+        val failed: Boolean
+            get() = status == "Error" || status == "Timeout" || status == "Rejected" || timedOut || turnError != null
+    }
+
+    /**
+     * [OM-09] The inline error stamped on the assistant reply that ended the latest turn, or null.
+     * Only messages after the last user message count, so a failure from an earlier turn is not
+     * blamed on this one.
+     */
+    internal fun turnErrorOf(messages: List<com.openminis.app.ui.chat.ChatMessage>): String? {
+        val lastUser = messages.indexOfLast { it.role == "user" }
+        return messages.drop(lastUser + 1)
+            .lastOrNull { it.role == "assistant" && !it.error.isNullOrBlank() }
+            ?.error
+    }
 
     data class CompactResult(
         val status: String,

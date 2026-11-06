@@ -1,0 +1,615 @@
+# Manual artifact-only QA build for the approved OM-09 / OM-13 patch.
+# workflow_dispatch only. No push, pull_request, schedule, or release trigger.
+# This file is the workflow GitHub executes for the dispatched ref, and the
+# same bytes are on main so the event can be registered. It refuses every
+# ref except the approved test branch, and it refuses any tree that is not
+# that branch's single commit on the approved base.
+
+name: QA OM09 OM13 artifact
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qa-om09-om13-artifact-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  qa-artifact:
+    if: github.repository == 'Gforce10-design/OpenMinis' && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      NDK_VERSION: "28.2.13676358"
+      BUILD_TOOLS_VERSION: "35.0.1"
+      EXPECTED_BASE: "9961916f9e904757d19df55e24635b475317d314"
+      EXPECTED_REF: "refs/heads/qa/om09-om13-s10-20261106"
+      EXPECTED_PACKAGE: "com.openminis.app"
+      EXPECTED_VERSION_NAME: "1.15-gf"
+      EXPECTED_VERSION_CODE: "37"
+      EXPECTED_CERT: "890a47d0ba8699b841bd74d01a5cac60d27acd9a26d92a3db67db5c71a9ba439"
+      BLOB_HEADLESS: "a466b2e37332c17aa4d4859dd1bcf0722a641888"
+      BLOB_SCHEDULED: "6c3a30f4bfa1f69ccfbe204f2b16d082a922fa31"
+      BLOB_CHAT: "62e23b887813c806e2b8570fcde4099bc62ccd61"
+      BLOB_TEST: "6e88be3d193585957eefa344ddb55d53b7efc8da"
+    steps:
+      - name: Checkout the dispatched commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          submodules: false
+
+      - name: Refuse anything except the approved patch
+        id: verify_tree
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ]; then
+            echo "refusing event ${GITHUB_EVENT_NAME}" >&2
+            exit 1
+          fi
+          if [ "${GITHUB_REF}" != "${EXPECTED_REF}" ]; then
+            echo "refusing ref ${GITHUB_REF}" >&2
+            exit 1
+          fi
+          case "${GITHUB_WORKFLOW_REF}" in
+            "Gforce10-design/OpenMinis/.github/workflows/qa-om09-om13-artifact.yml@${EXPECTED_REF}"|\
+            "Gforce10-design/OpenMinis/.github/workflows/qa-om09-om13-artifact.yml@refs/heads/main")
+              ;;
+            *)
+              echo "refusing workflow file ref ${GITHUB_WORKFLOW_REF}" >&2
+              exit 1
+              ;;
+          esac
+          if git remote | grep -qx upstream; then
+            echo "refusing unexpected upstream remote" >&2
+            exit 1
+          fi
+          if [ "$(git rev-parse HEAD)" != "${GITHUB_SHA}" ]; then
+            echo "checkout does not match the dispatched commit" >&2
+            exit 1
+          fi
+          parent="$(git rev-parse HEAD^)"
+          if [ "${parent}" != "${EXPECTED_BASE}" ]; then
+            echo "refusing parent ${parent}" >&2
+            exit 1
+          fi
+          git cat-file -e "${EXPECTED_BASE}^{commit}"
+          expected_paths="$(mktemp)"
+          actual_paths="$(mktemp)"
+          printf '%s\n' \
+            .github/workflows/qa-om09-om13-artifact.yml \
+            src/android/app/src/main/java/com/openminis/app/debug/HeadlessChatRunner.kt \
+            src/android/app/src/main/java/com/openminis/app/scheduled/ScheduledAgentRunner.kt \
+            src/android/app/src/main/java/com/openminis/app/ui/chat/ChatViewModel.kt \
+            src/android/app/src/test/java/com/openminis/app/ui/chat/QaFixesOm09Om13Test.kt \
+            | sort > "${expected_paths}"
+          git diff --name-only "${EXPECTED_BASE}" HEAD | sort > "${actual_paths}"
+          if ! cmp -s "${expected_paths}" "${actual_paths}"; then
+            echo "refusing diff against the approved base" >&2
+            echo "expected paths:" >&2
+            cat "${expected_paths}" >&2
+            echo "actual paths:" >&2
+            cat "${actual_paths}" >&2
+            rm -f "${expected_paths}" "${actual_paths}"
+            exit 1
+          fi
+          rm -f "${expected_paths}" "${actual_paths}"
+          check_blob() {
+            local path="$1"
+            local expected="$2"
+            local actual
+            actual="$(git hash-object "${path}")"
+            if [ "${actual}" != "${expected}" ]; then
+              echo "blob mismatch for ${path}" >&2
+              echo "expected ${expected}" >&2
+              echo "actual   ${actual}" >&2
+              exit 1
+            fi
+          }
+          check_blob src/android/app/src/main/java/com/openminis/app/debug/HeadlessChatRunner.kt "${BLOB_HEADLESS}"
+          check_blob src/android/app/src/main/java/com/openminis/app/scheduled/ScheduledAgentRunner.kt "${BLOB_SCHEDULED}"
+          check_blob src/android/app/src/main/java/com/openminis/app/ui/chat/ChatViewModel.kt "${BLOB_CHAT}"
+          check_blob src/android/app/src/test/java/com/openminis/app/ui/chat/QaFixesOm09Om13Test.kt "${BLOB_TEST}"
+          echo "approved commit $(git rev-parse HEAD)"
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
+        with:
+          packages: platform-tools
+
+      - name: Install pinned Android packages
+        id: install_packages
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --install \
+            "platforms;android-36" \
+            "build-tools;${BUILD_TOOLS_VERSION}" \
+            "cmake;3.22.1" \
+            "ndk;${NDK_VERSION}" \
+            "platform-tools"
+          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "${GITHUB_ENV}"
+          echo "sdk.dir=${ANDROID_SDK_ROOT}" > src/android/local.properties
+
+      - name: Setup Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.25.5"
+          cache: false
+
+      - name: Require Fork signing secrets
+        id: require_secrets
+        env:
+          FORK_KEYSTORE_B64: ${{ secrets.FORK_KEYSTORE_B64 }}
+          FORK_KEYSTORE_PASSWORD: ${{ secrets.FORK_KEYSTORE_PASSWORD }}
+          FORK_KEY_ALIAS: ${{ secrets.FORK_KEY_ALIAS }}
+          FORK_KEY_PASSWORD: ${{ secrets.FORK_KEY_PASSWORD }}
+        run: |
+          set +x
+          set -euo pipefail
+          missing=0
+          for name in FORK_KEYSTORE_B64 FORK_KEYSTORE_PASSWORD FORK_KEY_ALIAS FORK_KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "missing repository secret: ${name}"
+              missing=1
+            else
+              echo "present repository secret: ${name}"
+            fi
+          done
+          if [ "${missing}" != 0 ]; then
+            echo "signing secrets are absent; no APK will be built" >&2
+            exit 1
+          fi
+
+      - name: Full unit tests on the clean base
+        id: test_base
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          git worktree add --detach "${RUNNER_TEMP}/qa-base" "${EXPECTED_BASE}"
+          props="${RUNNER_TEMP}/qa-base/src/android/gradle.properties"
+          sed -i 's/^org.gradle.jvmargs=.*/org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8/' "${props}"
+          grep -q '^kotlin.daemon.jvmargs=' "${props}" || echo 'kotlin.daemon.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g' >> "${props}"
+          cd "${RUNNER_TEMP}/qa-base/src/android"
+          chmod +x ./gradlew
+          ./gradlew :app:testGithubDebugUnitTest --stacktrace --no-daemon
+
+      - name: Retain base JUnit XML
+        if: always() && steps.test_base.outcome != 'skipped'
+        run: |
+          set -euo pipefail
+          mkdir -p qa-out/junit-base
+          src="${RUNNER_TEMP}/qa-base/src/android/app/build/test-results/testGithubDebugUnitTest"
+          found=0
+          if [ -d "${src}" ]; then
+            while IFS= read -r -d '' file; do
+              found=1
+              rel="${file#"${src}/"}"
+              mkdir -p "qa-out/junit-base/$(dirname "${rel}")"
+              cp -- "${file}" "qa-out/junit-base/${rel}"
+            done < <(find "${src}" -type f -name 'TEST-*.xml' -print0)
+          fi
+          if [ "${found}" -eq 0 ]; then
+            echo "no JUnit XML was produced" > qa-out/junit-base/MISSING.txt
+          fi
+
+      - name: Full unit tests on the patched commit
+        id: test_head
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          props="src/android/gradle.properties"
+          sed -i 's/^org.gradle.jvmargs=.*/org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8/' "${props}"
+          grep -q '^kotlin.daemon.jvmargs=' "${props}" || echo 'kotlin.daemon.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g' >> "${props}"
+          cd src/android
+          chmod +x ./gradlew
+          ./gradlew :app:testGithubDebugUnitTest --stacktrace --no-daemon
+
+      - name: Retain patched full-suite JUnit XML
+        if: always() && steps.test_head.outcome != 'skipped'
+        run: |
+          set -euo pipefail
+          mkdir -p qa-out/junit-head-full
+          src="src/android/app/build/test-results/testGithubDebugUnitTest"
+          found=0
+          if [ -d "${src}" ]; then
+            while IFS= read -r -d '' file; do
+              found=1
+              rel="${file#"${src}/"}"
+              mkdir -p "qa-out/junit-head-full/$(dirname "${rel}")"
+              cp -- "${file}" "qa-out/junit-head-full/${rel}"
+            done < <(find "${src}" -type f -name 'TEST-*.xml' -print0)
+          fi
+          if [ "${found}" -eq 0 ]; then
+            echo "no JUnit XML was produced" > qa-out/junit-head-full/MISSING.txt
+          fi
+
+      - name: Targeted OM09/OM13 tests
+        id: test_targeted
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          cd src/android
+          chmod +x ./gradlew
+          ./gradlew :app:testGithubDebugUnitTest --tests com.openminis.app.ui.chat.QaFixesOm09Om13Test --stacktrace --no-daemon
+
+      - name: Retain targeted JUnit XML
+        if: always() && steps.test_targeted.outcome != 'skipped'
+        run: |
+          set -euo pipefail
+          mkdir -p qa-out/junit-head-targeted
+          src="src/android/app/build/test-results/testGithubDebugUnitTest"
+          found=0
+          if [ -d "${src}" ]; then
+            while IFS= read -r -d '' file; do
+              found=1
+              rel="${file#"${src}/"}"
+              mkdir -p "qa-out/junit-head-targeted/$(dirname "${rel}")"
+              cp -- "${file}" "qa-out/junit-head-targeted/${rel}"
+            done < <(find "${src}" -type f -name 'TEST-*.xml' -print0)
+          fi
+          if [ "${found}" -eq 0 ]; then
+            echo "no JUnit XML was produced" > qa-out/junit-head-targeted/MISSING.txt
+          fi
+
+      - name: Host packages for the native build
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends make curl ca-certificates libdigest-sha-perl unzip
+
+      - name: Build pinned native dependencies
+        id: native
+        run: |
+          set -euo pipefail
+          git submodule update --init deps/proot
+          if [ ! -e src/android/app/src/main/assets/proot-aarch64 ]; then
+            ./deps/build_proot.sh
+          else
+            test -f src/android/app/src/main/jniLibs/arm64-v8a/libproot.so
+          fi
+          ./scripts/prepare_android_sandbox.sh
+          if [ ! -f src/android/app/libs/rclone.aar ]; then
+            go install golang.org/x/mobile/cmd/gomobile@latest
+            go install golang.org/x/mobile/cmd/gobind@latest
+            export PATH="$(go env GOPATH)/bin:${PATH}"
+            gomobile init
+            ./deps/build_rclone_android.sh
+            mkdir -p src/android/app/libs
+            cp deps/build/rclone/rclone.aar src/android/app/libs/rclone.aar
+          fi
+          test -s src/android/app/libs/rclone.aar
+          test -s src/android/app/src/main/assets/alpine-minirootfs.tar.gz
+          test -s src/android/app/src/main/assets/proot-aarch64
+
+      - name: Assemble signed release APK
+        id: assemble
+        env:
+          FORK_VERSION_SUFFIX: "-gf"
+          FORK_RELEASE_REPO: Gforce10-design/OpenMinis
+          FORK_KEYSTORE_B64: ${{ secrets.FORK_KEYSTORE_B64 }}
+          FORK_KEYSTORE_PASSWORD: ${{ secrets.FORK_KEYSTORE_PASSWORD }}
+          FORK_KEY_ALIAS: ${{ secrets.FORK_KEY_ALIAS }}
+          FORK_KEY_PASSWORD: ${{ secrets.FORK_KEY_PASSWORD }}
+        run: |
+          set +x
+          set -euo pipefail
+          cd src/android
+          chmod +x ./gradlew
+          ./gradlew :app:assembleRelease --stacktrace --no-daemon
+          test -f app/build/outputs/apk/github/release/app-github-release.apk
+
+      - name: Verify package, version, and Fork signer
+        id: verify_apk
+        run: |
+          set -euo pipefail
+          APK="src/android/app/build/outputs/apk/github/release/app-github-release.apk"
+          test -f "${APK}"
+          AAPT="${ANDROID_SDK_ROOT}/build-tools/${BUILD_TOOLS_VERSION}/aapt"
+          APKSIGNER="${ANDROID_SDK_ROOT}/build-tools/${BUILD_TOOLS_VERSION}/apksigner"
+          BADGING="$("${AAPT}" dump badging "${APK}" | head -n 1)"
+          PACKAGE="$(printf '%s\n' "${BADGING}" | sed -n "s/.*name='\([^']*\)'.*/\1/p")"
+          VERSION_NAME="$(printf '%s\n' "${BADGING}" | sed -n "s/.*versionName='\([^']*\)'.*/\1/p")"
+          VERSION_CODE="$(printf '%s\n' "${BADGING}" | sed -n "s/.*versionCode='\([^']*\)'.*/\1/p")"
+          test "${PACKAGE}" = "${EXPECTED_PACKAGE}"
+          test "${VERSION_NAME}" = "${EXPECTED_VERSION_NAME}"
+          test "${VERSION_CODE}" = "${EXPECTED_VERSION_CODE}"
+          case "${VERSION_NAME}" in
+            *-gf) ;;
+            *) echo "expected a -gf versionName" >&2; exit 1 ;;
+          esac
+          mkdir -p dist qa-out
+          NAMED="MinisApp-${VERSION_NAME}-build${VERSION_CODE}-arm64-v8a-qa.apk"
+          cp -- "${APK}" "dist/${NAMED}"
+          (cd dist && sha256sum "${NAMED}" > SHA256SUMS)
+          "${APKSIGNER}" verify --print-certs "dist/${NAMED}" > qa-out/apk-certs.txt
+          python3 - << 'PY'
+          import os
+          import pathlib
+          import re
+          import sys
+          text = pathlib.Path("qa-out/apk-certs.txt").read_text()
+          match = re.search(r"SHA-?256(?: digest)?:\s*([0-9A-Fa-f:]+)", text)
+          if not match:
+              sys.exit("no certificate SHA-256 in apksigner output")
+          actual = match.group(1).replace(":", "").lower()
+          expected = os.environ["EXPECTED_CERT"]
+          print("apk_cert_sha256", actual)
+          if actual != expected:
+              sys.exit("APK certificate does not match the Fork signer")
+          pathlib.Path("qa-out/cert-sha256.txt").write_text(actual + "\n")
+          PY
+          APK_SHA256="$(cut -d' ' -f1 dist/SHA256SUMS)"
+          cat > qa-out/build-meta.txt << EOF
+          repository=${GITHUB_REPOSITORY}
+          base=${EXPECTED_BASE}
+          head=${GITHUB_SHA}
+          ref=${GITHUB_REF}
+          package=${PACKAGE}
+          version_name=${VERSION_NAME}
+          version_code=${VERSION_CODE}
+          apk_name=${NAMED}
+          apk_sha256=${APK_SHA256}
+          cert_sha256=${EXPECTED_CERT}
+          release_created=no
+          EOF
+          echo "verified ${NAMED}"
+          cat dist/SHA256SUMS
+
+      - name: Delete signing material before upload
+        id: purge_secrets
+        if: always()
+        run: |
+          set +x
+          set -euo pipefail
+          removed=0
+          search_dirs=()
+          for dir in src/android/build "${RUNNER_TEMP}/qa-base/src/android/build" dist qa-out qa-publish; do
+            if [ -d "${dir}" ]; then
+              search_dirs+=("${dir}")
+            fi
+          done
+          if [ "${#search_dirs[@]}" -gt 0 ]; then
+            while IFS= read -r -d '' file; do
+              rm -f -- "${file}"
+              removed=$((removed + 1))
+            done < <(find "${search_dirs[@]}" -type f \( -name 'fork-release.keystore' -o -name '*.keystore' -o -name '*.jks' \) -print0)
+          fi
+          remaining=0
+          if [ "${#search_dirs[@]}" -gt 0 ]; then
+            while IFS= read -r -d '' _; do
+              remaining=$((remaining + 1))
+            done < <(find "${search_dirs[@]}" -type f \( -name 'fork-release.keystore' -o -name '*.keystore' -o -name '*.jks' \) -print0)
+          fi
+          mkdir -p qa-out
+          cat > qa-out/secret-cleanup.txt << EOF
+          keystore_files_removed=${removed}
+          keystore_files_remaining=${remaining}
+          EOF
+          echo "keystore_files_removed=${removed}"
+          echo "keystore_files_remaining=${remaining}"
+          test "${remaining}" -eq 0
+
+      - name: Write the full-suite differential
+        id: differential
+        if: always() && steps.purge_secrets.outcome == 'success'
+        run: |
+          set -euo pipefail
+          mkdir -p qa-out
+          python3 - << 'PY'
+          import json
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          def files(root: Path):
+              if not root.is_dir():
+                  return []
+              return sorted(root.rglob("TEST-*.xml"))
+
+          def counts(root: Path):
+              tests = failures = errors = skipped = 0
+              for path in files(root):
+                  parsed = ET.parse(path).getroot()
+                  suites = [parsed] if parsed.tag == "testsuite" else list(parsed.iter("testsuite"))
+                  for suite in suites:
+                      tests += int(suite.get("tests") or 0)
+                      failures += int(suite.get("failures") or 0)
+                      errors += int(suite.get("errors") or 0)
+                      skipped += int(suite.get("skipped") or 0)
+              return {
+                  "tests": tests,
+                  "failures": failures,
+                  "errors": errors,
+                  "skipped": skipped,
+                  "xml_files": len(files(root)),
+              }
+
+          def problems_of(root: Path, tags):
+              found = {}
+              for path in files(root):
+                  parsed = ET.parse(path).getroot()
+                  for case in parsed.iter("testcase"):
+                      matched = [child for child in list(case) if child.tag in tags]
+                      if not matched:
+                          continue
+                      key = f"{case.get('classname')}#{case.get('name')}"
+                      chunks = []
+                      for child in matched:
+                          message = child.get("message") or ""
+                          kind = child.get("type") or child.tag
+                          body = child.text or ""
+                          chunks.append(f"{kind}: {message}\n{body}".rstrip())
+                      found[key] = "\n---\n".join(chunks)
+              return found
+
+          def cases_of(root: Path):
+              found = {}
+              for path in files(root):
+                  parsed = ET.parse(path).getroot()
+                  for case in parsed.iter("testcase"):
+                      tags = {child.tag for child in list(case)}
+                      key = f"{case.get('classname')}#{case.get('name')}"
+                      if "failure" in tags or "error" in tags:
+                          found[key] = "failed"
+                      elif "skipped" in tags:
+                          found[key] = "skipped"
+                      else:
+                          found[key] = "passed"
+              return found
+
+          base_dir = Path("qa-out/junit-base")
+          head_dir = Path("qa-out/junit-head-full")
+          targeted_dir = Path("qa-out/junit-head-targeted")
+          base = problems_of(base_dir, ("failure", "error"))
+          head = problems_of(head_dir, ("failure", "error"))
+          base_skipped = problems_of(base_dir, ("skipped",))
+          head_skipped = problems_of(head_dir, ("skipped",))
+          only_base = sorted(set(base) - set(head))
+          only_head = sorted(set(head) - set(base))
+          both = sorted(set(base) & set(head))
+          targeted = cases_of(targeted_dir)
+          targeted_failures = problems_of(targeted_dir, ("failure", "error"))
+          report = {
+              "base": counts(base_dir),
+              "head": counts(head_dir),
+              "targeted": counts(targeted_dir),
+              "failed_only_on_base": {key: base[key] for key in only_base},
+              "failed_only_on_head": {key: head[key] for key in only_head},
+              "failed_on_both": {key: head[key] for key in both},
+              "skipped_on_base": base_skipped,
+              "skipped_on_head": head_skipped,
+              "targeted_cases": targeted,
+              "targeted_failures": targeted_failures,
+          }
+          Path("qa-out/differential.json").write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n")
+
+          def section(title, keys, source):
+              lines = [f"## {title} ({len(keys)})", ""]
+              for key in keys:
+                  lines.extend([f"### {key}", "", "```", source[key], "```", ""])
+              return lines
+
+          lines = [
+              "# OM09/OM13 full unit-test differential",
+              "",
+              "New failures are listed only on the patched head. Unchanged failures were already failing on the clean base.",
+              "",
+              f"base xml files: {report['base']['xml_files']}",
+              f"base tests/failures/errors/skipped: {report['base']['tests']}/{report['base']['failures']}/{report['base']['errors']}/{report['base']['skipped']}",
+              f"head xml files: {report['head']['xml_files']}",
+              f"head tests/failures/errors/skipped: {report['head']['tests']}/{report['head']['failures']}/{report['head']['errors']}/{report['head']['skipped']}",
+              f"targeted xml files: {report['targeted']['xml_files']}",
+              f"targeted tests/failures/errors/skipped: {report['targeted']['tests']}/{report['targeted']['failures']}/{report['targeted']['errors']}/{report['targeted']['skipped']}",
+              "",
+          ]
+          lines.extend(section("Failed only on base", only_base, base))
+          lines.extend(section("New failures on patched head", only_head, head))
+          lines.extend(section("Unchanged failures", both, head))
+          lines.extend(section("Skipped on base", sorted(base_skipped), base_skipped))
+          lines.extend(section("Skipped on patched head", sorted(head_skipped), head_skipped))
+          lines.extend([f"## Targeted OM09/OM13 cases ({len(targeted)})", ""])
+          if not targeted:
+              lines.extend(["No targeted test cases were recorded.", ""])
+          for key, status in sorted(targeted.items()):
+              lines.append(f"- {status}: {key}")
+          lines.append("")
+          lines.extend(section("Targeted failures", sorted(targeted_failures), targeted_failures))
+          Path("qa-out/differential.md").write_text("\n".join(lines) + "\n")
+          print(
+              f"only_base={len(only_base)} new_on_head={len(only_head)} "
+              f"unchanged={len(both)} targeted={len(targeted)} "
+              f"targeted_failed={len(targeted_failures)}"
+          )
+          PY
+
+      - name: Stage explicit nonsecret artifacts
+        id: stage_artifacts
+        if: always() && steps.purge_secrets.outcome == 'success'
+        run: |
+          set -euo pipefail
+          rm -rf qa-publish
+          mkdir -p qa-publish/junit qa-publish/apk
+          copy_tree() {
+            local src="$1"
+            local dest="$2"
+            mkdir -p "${dest}"
+            if [ -d "${src}" ]; then
+              while IFS= read -r -d '' file; do
+                rel="${file#"${src}/"}"
+                mkdir -p "${dest}/$(dirname "${rel}")"
+                cp -- "${file}" "${dest}/${rel}"
+              done < <(find "${src}" -type f \( -name 'TEST-*.xml' -o -name 'MISSING.txt' \) -print0)
+            fi
+          }
+          copy_tree qa-out/junit-base qa-publish/junit/base
+          copy_tree qa-out/junit-head-full qa-publish/junit/head-full
+          copy_tree qa-out/junit-head-targeted qa-publish/junit/head-targeted
+          for name in differential.md differential.json secret-cleanup.txt; do
+            if [ -f "qa-out/${name}" ]; then
+              cp -- "qa-out/${name}" "qa-publish/junit/${name}"
+            fi
+          done
+          for name in SHA256SUMS; do
+            if [ -f "dist/${name}" ]; then
+              cp -- "dist/${name}" "qa-publish/apk/${name}"
+            fi
+          done
+          if [ -f dist/MinisApp-1.15-gf-build37-arm64-v8a-qa.apk ]; then
+            cp -- dist/MinisApp-1.15-gf-build37-arm64-v8a-qa.apk qa-publish/apk/MinisApp-1.15-gf-build37-arm64-v8a-qa.apk
+          fi
+          for name in cert-sha256.txt build-meta.txt apk-certs.txt; do
+            if [ -f "qa-out/${name}" ]; then
+              cp -- "qa-out/${name}" "qa-publish/apk/${name}"
+            fi
+          done
+          if find qa-publish -type f \( -name '*.keystore' -o -name '*.jks' -o -name '*.b64' \) | grep -q .; then
+            echo "refusing to upload signing material" >&2
+            exit 1
+          fi
+          find qa-publish -type f -print | sort
+
+      - name: Upload JUnit results and differential
+        if: always() && steps.purge_secrets.outcome == 'success' && steps.stage_artifacts.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: qa-om09-om13-junit
+          path: qa-publish/junit/
+          if-no-files-found: warn
+
+      - name: Upload APK, checksum, and public certificate fingerprint
+        if: always() && steps.purge_secrets.outcome == 'success' && steps.stage_artifacts.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: qa-om09-om13-apk
+          path: qa-publish/apk/
+          if-no-files-found: warn
+
+      - name: Fail closed unless tests and APK checks succeeded
+        if: always() && (
+          steps.verify_tree.outcome != 'success' ||
+          steps.install_packages.outcome != 'success' ||
+          steps.require_secrets.outcome != 'success' ||
+          steps.test_base.outcome != 'success' ||
+          steps.test_head.outcome != 'success' ||
+          steps.test_targeted.outcome != 'success' ||
+          steps.native.outcome != 'success' ||
+          steps.assemble.outcome != 'success' ||
+          steps.verify_apk.outcome != 'success' ||
+          steps.purge_secrets.outcome != 'success' ||
+          steps.differential.outcome != 'success'
+          )
+        run: |
+          echo "fail closed: tree, tests, native build, secret cleanup, or APK verification did not succeed"
+          echo "no release was created"
+          exit 1

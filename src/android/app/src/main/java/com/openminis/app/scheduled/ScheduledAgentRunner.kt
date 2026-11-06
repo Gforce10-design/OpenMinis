@@ -191,7 +191,7 @@ object ScheduledAgentRunner {
             // an empty preview, where the old hard-coded placeholder showed as
             // untranslated English.
             val preview = (result.responseText ?: "").take(200).ifBlank { null }
-            val ok = result.status != "Error" && result.status != "Timeout" && result.status != "Rejected"
+            val ok = !result.failed  // [OM-09] includes a turn that ended in a provider error
             ScheduledTaskManager(app).markFired(task.id, sessionId, preview, ok = ok, firedAt = firedAt)
             // [T-android-scheduled-triggers] Tasks waiting on this one run
             // once its whole schedule is over.
@@ -215,7 +215,7 @@ object ScheduledAgentRunner {
             // an empty preview, where the old hard-coded placeholder showed as
             // untranslated English.
             val preview = (result.responseText ?: "").take(200).ifBlank { null }
-            val ok = result.status != "Error" && result.status != "Timeout" && result.status != "Rejected"
+            val ok = !result.failed  // [OM-09] includes a turn that ended in a provider error
             ScheduledTaskManager(app).markFired(task.id, sessionId, preview, ok = ok, firedAt = firedAt)
             // [T-android-scheduled-triggers] Tasks waiting on this one run
             // once its whole schedule is over.
@@ -508,7 +508,7 @@ object ScheduledAgentRunner {
         registry.setSummaryLine(job.id, hr.runSummaryLine(facts.toolNames, facts.turns, facts.input, facts.output, facts.cacheRead))
         val state = when {
             result.timedOut || result.status == "Timeout" -> com.openminis.app.agent.jobs.AgentJobState.TIMEOUT
-            result.status == "Error" || result.status == "Rejected" -> com.openminis.app.agent.jobs.AgentJobState.FAILED
+            result.status == "Error" || result.status == "Rejected" || result.turnError != null -> com.openminis.app.agent.jobs.AgentJobState.FAILED
             else -> com.openminis.app.agent.jobs.AgentJobState.DONE
         }
         registry.finish(job.id, state, facts.lastText)

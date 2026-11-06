@@ -10528,6 +10528,30 @@ class ChatViewModel(
     }
 
     /**
+     * [OM-13] A raw connectivity failure (no DNS, refused connection, timeout) that a provider
+     * did not map to an [com.openminis.app.data.model.LLMError] reaches the agent loop as a plain
+     * exception. Wrap it as NetworkError so the 1/2/4s same-model retry ladder applies. Only
+     * these specific connectivity types are mapped: a user Stop surfaces as a generic
+     * IOException("Canceled"), which must stay unmapped so it never starts a retry countdown.
+     */
+    private fun mapRawNetworkFailure(t: Throwable): Throwable {
+        if (t is com.openminis.app.data.model.LLMError) return t
+        var cause: Throwable? = t
+        var depth = 0
+        while (cause != null && depth++ < 8) {
+            if (cause is java.net.UnknownHostException ||
+                cause is java.net.ConnectException ||
+                cause is java.net.NoRouteToHostException ||
+                cause is java.net.SocketTimeoutException
+            ) {
+                return com.openminis.app.data.model.LLMError.NetworkError(cause)
+            }
+            cause = cause.cause
+        }
+        return t
+    }
+
+    /**
      * Compute max output tokens that fits within the remaining context window.
      * Logic mirrors iOS's dynamicMaxTokens():
      *   result = min(provider.defaultMaxTokens, max(contextWindow - inputTokens, MIN_MAX_TOKENS))
@@ -12526,7 +12550,7 @@ class ChatViewModel(
                     }
                 } catch (e: Exception) {
                     if (e is CancellationException && e.cause == null) throw e  // real job cancellation
-                    val actual = unwrapFlowException(e)
+                    val actual = mapRawNetworkFailure(unwrapFlowException(e))
                     val isRateLimit = actual is com.openminis.app.data.model.LLMError.RateLimited
                     // [T-android-503-fallback] A confirmed HTTP 5xx, taken from
                     // the structured status the provider mappers now attach.
