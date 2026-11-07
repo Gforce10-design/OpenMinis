@@ -349,6 +349,93 @@ jobs:
             echo "no JUnit XML was produced" > qa-out/junit-head-targeted/MISSING.txt
           fi
 
+      - name: Isolated same-heap recheck on the clean base
+        id: oom_recheck_base
+        if: always() && steps.native.outcome == 'success' && steps.verify_tree.outcome == 'success' && steps.require_secrets.outcome == 'success'
+        run: |
+          set -euo pipefail
+          test -d "${RUNNER_TEMP}/qa-base/src/android"
+          test -s "${RUNNER_TEMP}/qa-base/src/android/app/libs/rclone.aar"
+          cd "${RUNNER_TEMP}/qa-base/src/android"
+          chmod +x ./gradlew
+          set +e
+          ./gradlew :app:testGithubDebugUnitTest --tests com.openminis.app.ctx.RoboGraphicsProbeLegacyTest.probes --stacktrace --no-daemon
+          rc=$?
+          set -e
+          mkdir -p "${GITHUB_WORKSPACE}/qa-out"
+          cat > "${GITHUB_WORKSPACE}/qa-out/test-oom-recheck-base.status" << EOF
+          gradle_exit=${rc}
+          heap_change=none
+          label=isolated-same-heap-recheck
+          test=com.openminis.app.ctx.RoboGraphicsProbeLegacyTest.probes
+          EOF
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::isolated base recheck of RoboGraphicsProbeLegacyTest#probes failed (gradle exit ${rc})"
+          fi
+          exit "${rc}"
+
+      - name: Retain base OOM recheck XML
+        if: always() && steps.oom_recheck_base.outcome != 'skipped'
+        run: |
+          set -euo pipefail
+          mkdir -p qa-out/junit-oom-recheck-base
+          src="${RUNNER_TEMP}/qa-base/src/android/app/build/test-results/testGithubDebugUnitTest"
+          found=0
+          if [ -d "${src}" ]; then
+            while IFS= read -r -d '' file; do
+              found=1
+              rel="${file#"${src}/"}"
+              mkdir -p "qa-out/junit-oom-recheck-base/$(dirname "${rel}")"
+              cp -- "${file}" "qa-out/junit-oom-recheck-base/${rel}"
+            done < <(find "${src}" -type f -name 'TEST-*.xml' -print0)
+          fi
+          if [ "${found}" -eq 0 ]; then
+            echo "no JUnit XML was produced" > qa-out/junit-oom-recheck-base/MISSING.txt
+          fi
+
+      - name: Isolated same-heap recheck on the patched commit
+        id: oom_recheck_head
+        if: always() && steps.native.outcome == 'success' && steps.verify_tree.outcome == 'success' && steps.require_secrets.outcome == 'success'
+        run: |
+          set -euo pipefail
+          test -s src/android/app/libs/rclone.aar
+          cd src/android
+          chmod +x ./gradlew
+          set +e
+          ./gradlew :app:testGithubDebugUnitTest --tests com.openminis.app.ctx.RoboGraphicsProbeLegacyTest.probes --stacktrace --no-daemon
+          rc=$?
+          set -e
+          mkdir -p "${GITHUB_WORKSPACE}/qa-out"
+          cat > "${GITHUB_WORKSPACE}/qa-out/test-oom-recheck-head.status" << EOF
+          gradle_exit=${rc}
+          heap_change=none
+          label=isolated-same-heap-recheck
+          test=com.openminis.app.ctx.RoboGraphicsProbeLegacyTest.probes
+          EOF
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::isolated patched recheck of RoboGraphicsProbeLegacyTest#probes failed (gradle exit ${rc})"
+          fi
+          exit "${rc}"
+
+      - name: Retain patched OOM recheck XML
+        if: always() && steps.oom_recheck_head.outcome != 'skipped'
+        run: |
+          set -euo pipefail
+          mkdir -p qa-out/junit-oom-recheck-head
+          src="src/android/app/build/test-results/testGithubDebugUnitTest"
+          found=0
+          if [ -d "${src}" ]; then
+            while IFS= read -r -d '' file; do
+              found=1
+              rel="${file#"${src}/"}"
+              mkdir -p "qa-out/junit-oom-recheck-head/$(dirname "${rel}")"
+              cp -- "${file}" "qa-out/junit-oom-recheck-head/${rel}"
+            done < <(find "${src}" -type f -name 'TEST-*.xml' -print0)
+          fi
+          if [ "${found}" -eq 0 ]; then
+            echo "no JUnit XML was produced" > qa-out/junit-oom-recheck-head/MISSING.txt
+          fi
+
       - name: Assemble signed release APK
         id: assemble
         if: always() && steps.verify_tree.outcome == 'success' && steps.require_secrets.outcome == 'success' && steps.native.outcome == 'success'
@@ -384,9 +471,31 @@ jobs:
           cp -- "${APK}" dist/app-github-release.apk
           sha256sum dist/app-github-release.apk > dist/SHA256SUMS
           "${AAPT}" dump badging "${APK}" > qa-out/badging.txt
-          PACKAGE="$(sed -n "1s/.*name='\([^']*\)'.*/\1/p" qa-out/badging.txt)"
-          VERSION_NAME="$(sed -n "1s/.*versionName='\([^']*\)'.*/\1/p" qa-out/badging.txt)"
-          VERSION_CODE="$(sed -n "1s/.*versionCode='\([^']*\)'.*/\1/p" qa-out/badging.txt)"
+          python3 - << 'PY'
+          import pathlib
+          import re
+          lines = pathlib.Path("qa-out/badging.txt").read_text(errors="replace").splitlines()
+          line = lines[0] if lines else ""
+          package = re.match(r"^package: name='([^']*)'", line)
+          version_name = re.search(r"(?:^| )versionName='([^']*)'", line)
+          version_code = re.search(r"(?:^| )versionCode='([^']*)'", line)
+          fields = {
+              "package": package.group(1) if package else "",
+              "version_name": version_name.group(1) if version_name else "",
+              "version_code": version_code.group(1) if version_code else "",
+          }
+          pathlib.Path("qa-out/package-fields.txt").write_text(
+              "".join(f"{key}={value}\n" for key, value in fields.items())
+          )
+          print(
+              "parsed_package={package} version_name={version_name} version_code={version_code}".format(
+                  **fields
+              )
+          )
+          PY
+          PACKAGE="$(sed -n 's/^package=//p' qa-out/package-fields.txt)"
+          VERSION_NAME="$(sed -n 's/^version_name=//p' qa-out/package-fields.txt)"
+          VERSION_CODE="$(sed -n 's/^version_code=//p' qa-out/package-fields.txt)"
           set +e
           "${APKSIGNER}" verify --print-certs dist/app-github-release.apk > qa-out/apk-certs.txt
           signer_rc=$?
@@ -563,6 +672,12 @@ jobs:
           both = sorted(set(base) & set(head))
           targeted = cases_of(targeted_dir)
           targeted_failures = problems_of(targeted_dir, ("failure", "error"))
+          recheck_base_dir = Path("qa-out/junit-oom-recheck-base")
+          recheck_head_dir = Path("qa-out/junit-oom-recheck-head")
+          recheck_base_cases = cases_of(recheck_base_dir)
+          recheck_head_cases = cases_of(recheck_head_dir)
+          recheck_base_failures = problems_of(recheck_base_dir, ("failure", "error"))
+          recheck_head_failures = problems_of(recheck_head_dir, ("failure", "error"))
           report = {
               "base": counts(base_dir),
               "head": counts(head_dir),
@@ -574,6 +689,14 @@ jobs:
               "skipped_on_head": head_skipped,
               "targeted_cases": targeted,
               "targeted_failures": targeted_failures,
+              "oom_recheck_same_heap": {
+                  "heap_change": "none",
+                  "replaces_full_suite": False,
+                  "base_cases": recheck_base_cases,
+                  "head_cases": recheck_head_cases,
+                  "base_failures": recheck_base_failures,
+                  "head_failures": recheck_head_failures,
+              },
           }
           Path("qa-out/differential.json").write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n")
 
@@ -588,6 +711,8 @@ jobs:
               ("base", "qa-out/test-base.status"),
               ("head", "qa-out/test-head.status"),
               ("targeted", "qa-out/test-targeted.status"),
+              ("oom recheck base", "qa-out/test-oom-recheck-base.status"),
+              ("oom recheck head", "qa-out/test-oom-recheck-head.status"),
           ):
               path = Path(name)
               status_lines.append(
@@ -621,6 +746,26 @@ jobs:
               lines.append(f"- {status}: {key}")
           lines.append("")
           lines.extend(section("Targeted failures", sorted(targeted_failures), targeted_failures))
+          lines.extend([
+              "## Isolated same-heap recheck of RoboGraphicsProbeLegacyTest#probes",
+              "",
+              "This repeats only that test with the same Gradle test configuration as the full suite.",
+              "The test worker heap is unchanged. A pass here does not remove or reclassify a full-suite failure.",
+              "",
+              f"recheck base cases: {len(recheck_base_cases)}",
+              f"recheck head cases: {len(recheck_head_cases)}",
+              "",
+          ])
+          lines.extend(section("Isolated recheck failures on base", sorted(recheck_base_failures), recheck_base_failures))
+          lines.extend(section("Isolated recheck failures on patched head", sorted(recheck_head_failures), recheck_head_failures))
+          for label, cases in (("base", recheck_base_cases), ("patched head", recheck_head_cases)):
+              lines.append(f"### Recheck case status ({label})")
+              lines.append("")
+              if not cases:
+                  lines.append("No recheck test cases were recorded.")
+              for key, status in sorted(cases.items()):
+                  lines.append(f"- {status}: {key}")
+              lines.append("")
           Path("qa-out/differential.md").write_text("\n".join(lines) + "\n")
           print(
               f"only_base={len(only_base)} new_on_head={len(only_head)} "
@@ -651,7 +796,9 @@ jobs:
           copy_tree qa-out/junit-base qa-publish/junit/base
           copy_tree qa-out/junit-head-full qa-publish/junit/head-full
           copy_tree qa-out/junit-head-targeted qa-publish/junit/head-targeted
-          for name in differential.md differential.json secret-cleanup.txt test-base.status test-head.status test-targeted.status; do
+          copy_tree qa-out/junit-oom-recheck-base qa-publish/junit/oom-recheck-base
+          copy_tree qa-out/junit-oom-recheck-head qa-publish/junit/oom-recheck-head
+          for name in differential.md differential.json secret-cleanup.txt test-base.status test-head.status test-targeted.status test-oom-recheck-base.status test-oom-recheck-head.status package-fields.txt; do
             if [ -f "qa-out/${name}" ]; then
               cp -- "qa-out/${name}" "qa-publish/junit/${name}"
             fi
@@ -700,6 +847,8 @@ jobs:
           steps.test_base.outcome != 'success' ||
           steps.test_head.outcome != 'success' ||
           steps.test_targeted.outcome != 'success' ||
+          steps.oom_recheck_base.outcome != 'success' ||
+          steps.oom_recheck_head.outcome != 'success' ||
           steps.native.outcome != 'success' ||
           steps.assemble.outcome != 'success' ||
           steps.verify_apk.outcome != 'success' ||
